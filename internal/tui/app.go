@@ -146,9 +146,10 @@ type testDoneMsg struct {
 type syncDoneMsg struct{ err error }
 
 type sessionDoneMsg struct {
-	profileID string
-	hostKeyFP string
-	err       error
+	profileID   string
+	hostKeyFP   string
+	hostKeyLine string
+	err         error
 }
 
 func waitForProbe(ch chan probe.Status) tea.Cmd {
@@ -190,7 +191,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionDoneMsg:
-		m.pinHostKey(msg.profileID, msg.hostKeyFP)
+		m.pinHostKey(msg.profileID, msg.hostKeyFP, msg.hostKeyLine)
 		if msg.err != nil {
 			m.setStatus(statusErr, "session ended: "+truncErr(msg.err))
 		} else {
@@ -228,7 +229,7 @@ func (m *Model) applyTestResult(profileID string, r sshx.TestResult) {
 	}
 	if r.OK {
 		m.setStatus(statusOK, fmt.Sprintf("%s: %s (%.0f ms)", p.Name, r.Reason, float64(r.Latency.Milliseconds())))
-		m.pinHostKey(profileID, r.HostKeyFP)
+		m.pinHostKey(profileID, r.HostKeyFP, r.HostKeyLine)
 		return
 	}
 	kind := statusErr
@@ -239,17 +240,24 @@ func (m *Model) applyTestResult(profileID string, r sshx.TestResult) {
 	m.setStatus(kind, fmt.Sprintf("%s [%s]: %s", p.Name, r.Stage, r.Reason))
 }
 
-// pinHostKey records the fingerprint on first successful contact (TOFU).
-func (m *Model) pinHostKey(profileID, fp string) {
+// pinHostKey records the fingerprint + full key on first successful contact
+// (TOFU). The full key line lets ExternalCommand hand ssh a strict
+// known_hosts file, so the pin protects real sessions too.
+func (m *Model) pinHostKey(profileID, fp, line string) {
 	if fp == "" {
 		return
 	}
 	p := m.store.ByID(profileID)
-	if p == nil || p.HostKeyFP == fp {
+	if p == nil {
 		return
 	}
 	if p.HostKeyFP == "" {
-		p.HostKeyFP = fp
+		p.HostKeyFP, p.HostKey = fp, line
+		m.store.Save()
+		return
+	}
+	if p.HostKeyFP == fp && p.HostKey == "" && line != "" {
+		p.HostKey = line // backfill full key for profiles pinned before this field existed
 		m.store.Save()
 	}
 	// A differing pin never overwrites silently — sshx already refused the
@@ -313,13 +321,13 @@ func (m *Model) connectCmd(p profile.Profile) tea.Cmd {
 		}
 		return tea.ExecProcess(cmd, func(err error) tea.Msg {
 			cleanup()
-			return sessionDoneMsg{p.ID, "", err}
+			return sessionDoneMsg{p.ID, "", "", err}
 		})
 	}
 	// password-only: in-process PTY session
 	sess := &passwordSession{p: p, password: creds.Password}
 	return tea.Exec(sess, func(err error) tea.Msg {
-		return sessionDoneMsg{p.ID, sess.fp, err}
+		return sessionDoneMsg{p.ID, sess.fp, sess.keyLine, err}
 	})
 }
 
@@ -328,11 +336,13 @@ type passwordSession struct {
 	p        profile.Profile
 	password string
 	fp       string
+	keyLine  string
 }
 
 func (s *passwordSession) Run() error {
-	fp, err := sshx.RunPasswordSession(s.p, s.password)
-	s.fp = fp
+	fp, line, err := sshx.RunPasswordSession(s.p, s.password)
+	s.fp, s.keyLine = fp, line
+	s.password = "" // shrink the plaintext window once the session ends
 	return err
 }
 

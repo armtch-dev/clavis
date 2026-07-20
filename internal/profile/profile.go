@@ -40,6 +40,9 @@ type Profile struct {
 	// HostKeyFP is the pinned SHA256 fingerprint recorded on first successful
 	// connection (TOFU). A later mismatch triggers a loud MITM warning.
 	HostKeyFP string `json:"host_key_fp,omitempty"`
+	// HostKey is the full pinned public key (authorized_keys format) so
+	// external ssh sessions can be given a strict known_hosts file.
+	HostKey   string `json:"host_key,omitempty"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }

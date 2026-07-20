@@ -56,15 +56,24 @@ func firstKeyLine(s string) string {
 
 // SaveToKeychain stores the identity in the login keychain (opt-in; weakens
 // the "key lives elsewhere" guarantee, the settings UI says so).
+// The key is fed to `security -i` over stdin — never as an argv, which would
+// be visible in the process table.
 func SaveToKeychain(identity string) error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("keychain storage is only available on macOS")
 	}
-	cmd := exec.Command("security", "add-generic-password", "-U",
-		"-s", keychainService, "-a", keychainAccount, "-w", identity)
+	identity = strings.TrimSpace(identity)
+	if strings.ContainsAny(identity, "\"'\n\r") {
+		return fmt.Errorf("key contains characters unsafe for keychain storage")
+	}
+	cmd := exec.Command("security", "-i")
+	cmd.Stdin = strings.NewReader(fmt.Sprintf(
+		"add-generic-password -U -s %q -a %q -w %q\n",
+		keychainService, keychainAccount, identity))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("security add-generic-password: %v: %s", err, out)
+		return fmt.Errorf("security add-generic-password failed: %v: %s",
+			err, strings.ReplaceAll(string(out), identity, "•••"))
 	}
 	return nil
 }

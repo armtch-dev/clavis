@@ -172,6 +172,12 @@ func (m *Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if key.Type == tea.KeyEsc {
 		if w.step == stepName || w.awaitingTest {
+			// Abandoning the wizard: drop any typed secrets with it.
+			w.password, w.passphrase = "", ""
+			for i := range w.keyPEM {
+				w.keyPEM[i] = 0
+			}
+			m.wizard = nil
 			m.screen = scrList
 			return m, nil
 		}
@@ -405,7 +411,15 @@ func (w *wizardModel) save(m *Model) (tea.Model, tea.Cmd) {
 	// TOFU pin from the wizard's successful test.
 	if w.testResult != nil && w.testResult.OK && saved.HostKeyFP == "" {
 		saved.HostKeyFP = w.testResult.HostKeyFP
+		saved.HostKey = w.testResult.HostKeyLine
 	}
+	// Plaintext copies are no longer needed once they're in the vault.
+	w.password, w.passphrase = "", ""
+	for i := range w.keyPEM {
+		w.keyPEM[i] = 0
+	}
+	w.keyPEM = nil
+	m.wizard = nil
 	m.screen = scrList
 	m.setStatus(statusOK, "saved "+saved.Name)
 	return m, m.saveAll("save profile " + saved.Name)

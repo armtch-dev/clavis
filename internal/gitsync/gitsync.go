@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -103,9 +104,10 @@ AGE-SECRET-KEY-*
 	return os.WriteFile(filepath.Join(c.Dir, ".gitignore"), []byte(ignore), 0o600)
 }
 
-// allowedFile reports whether a repo-relative path may be committed.
-// vaultCheck additionally verifies age ciphertext for vault files.
-func allowedFile(dir, rel string) error {
+// allowedPath is the sync allowlist: only these repo-relative paths may ever
+// be committed. Content checks happen separately (worktree pre-check and
+// staged-blob check).
+func allowedPath(rel string) error {
 	rel = filepath.ToSlash(rel)
 	switch rel {
 	case "profiles.json", "config.json", "vault.meta", ".gitignore", "README.md":
@@ -115,18 +117,79 @@ func allowedFile(dir, rel string) error {
 		if !strings.HasSuffix(rel, ".age") {
 			return fmt.Errorf("%s: only .age files may live in vault/", rel)
 		}
-		f, err := os.Open(filepath.Join(dir, rel))
-		if err != nil {
-			return fmt.Errorf("%s: %v", rel, err)
-		}
-		defer f.Close()
-		head := make([]byte, len(vault.AgeHeader))
-		if _, err := f.Read(head); err != nil || string(head) != vault.AgeHeader {
-			return fmt.Errorf("%s: not age ciphertext — refusing to sync", rel)
-		}
 		return nil
 	}
 	return fmt.Errorf("%s: not on the sync allowlist", rel)
+}
+
+// allowedFile = path allowlist + on-disk content check (worktree pre-check).
+func allowedFile(dir, rel string) error {
+	if err := allowedPath(rel); err != nil {
+		return err
+	}
+	if !strings.HasPrefix(filepath.ToSlash(rel), "vault/") {
+		return nil
+	}
+	// Symlinks would make the guard validate different bytes than git stores.
+	if fi, err := os.Lstat(filepath.Join(dir, rel)); err != nil {
+		return fmt.Errorf("%s: %v", rel, err)
+	} else if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s: symlinks are not allowed in vault/", rel)
+	}
+	f, err := os.Open(filepath.Join(dir, rel))
+	if err != nil {
+		return fmt.Errorf("%s: %v", rel, err)
+	}
+	defer f.Close()
+	head := make([]byte, len(vault.AgeHeader))
+	if _, err := io.ReadFull(f, head); err != nil || string(head) != vault.AgeHeader {
+		return fmt.Errorf("%s: not age ciphertext — refusing to sync", rel)
+	}
+	return nil
+}
+
+// guardStaged validates what will ACTUALLY be committed: every entry in the
+// index, by staged blob content, after `git add`. This closes the gap where
+// a file passes the worktree check and is swapped before staging (TOCTOU).
+func (c *Client) guardStaged() error {
+	out, err := c.git("ls-files", "--stage", "-z")
+	if err != nil {
+		return err
+	}
+	var offenders []string
+	for _, ent := range strings.Split(out, "\x00") {
+		if strings.TrimSpace(ent) == "" {
+			continue
+		}
+		// format: <mode> <oid> <stage>\t<path>
+		tab := strings.IndexByte(ent, '\t')
+		if tab < 0 {
+			continue
+		}
+		meta, rel := strings.Fields(ent[:tab]), ent[tab+1:]
+		if len(meta) < 1 {
+			continue
+		}
+		if meta[0] == "120000" {
+			offenders = append(offenders, rel+": symlinks are never synced")
+			continue
+		}
+		if err := allowedPath(rel); err != nil {
+			offenders = append(offenders, err.Error())
+			continue
+		}
+		if strings.HasPrefix(filepath.ToSlash(rel), "vault/") {
+			blob, err := c.git("cat-file", "blob", ":"+rel)
+			if err != nil || !strings.HasPrefix(blob, vault.AgeHeader) {
+				offenders = append(offenders, rel+": staged content is not age ciphertext — refusing to sync")
+			}
+		}
+	}
+	if len(offenders) > 0 {
+		sort.Strings(offenders)
+		return fmt.Errorf("sync blocked, unsafe staged content:\n  %s", strings.Join(offenders, "\n  "))
+	}
+	return nil
 }
 
 // Guard inspects everything that would be committed (tracked + untracked,
@@ -161,7 +224,9 @@ func (c *Client) Guard() error {
 	return nil
 }
 
-// Commit stages and commits everything — after the guard passes.
+// Commit stages and commits everything — worktree guard first (fast fail),
+// then the authoritative staged-blob guard; on failure the stage is rolled
+// back so nothing unsafe lingers in the index.
 func (c *Client) Commit(msg string) (bool, error) {
 	if err := c.ensureIgnore(); err != nil {
 		return false, err
@@ -170,6 +235,10 @@ func (c *Client) Commit(msg string) (bool, error) {
 		return false, err
 	}
 	if _, err := c.git("add", "-A"); err != nil {
+		return false, err
+	}
+	if err := c.guardStaged(); err != nil {
+		c.git("reset", "-q")
 		return false, err
 	}
 	staged, _ := c.git("diff", "--cached", "--name-only")

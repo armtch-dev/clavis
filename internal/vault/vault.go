@@ -134,9 +134,11 @@ func (v *Vault) writeMeta(rec *age.X25519Recipient) error {
 
 // Unlock verifies the identity against the stored recipient and arms decryption.
 func (v *Vault) Unlock(identityStr string) error {
+	// Deliberately opaque: parse errors must never echo fragments of the
+	// (secret) input into a rendered/logged message.
 	id, err := age.ParseX25519Identity(strings.TrimSpace(identityStr))
 	if err != nil {
-		return fmt.Errorf("not a valid key: %w", err)
+		return errors.New("not a valid key")
 	}
 	if id.Recipient().String() != v.recipient.String() {
 		return ErrWrongKey

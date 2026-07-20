@@ -47,8 +47,16 @@ scriptorium.
        help overlay, --dump-frame debug flag
 - [x] 7. CLI: doctor, vault rekey/reset, import from ~/.ssh/config
        (Sonnet agent; ssh_config parser by Haiku agent)
-- [ ] 8. Docs (README, SECURITY.md), Opus security-review fixes, release
-       tooling (goreleaser, install.sh)
+- [x] 8. Docs (README, SECURITY.md — Haiku agent, fact-checked), Opus
+       security review done; all HIGH/MEDIUM findings fixed:
+       * pinned known_hosts now enforced for external key-auth sessions
+       * master key to Keychain via `security -i` stdin (no argv exposure)
+       * guard re-validates STAGED blobs (TOCTOU) + rejects symlinks
+       * --dump-frame refuses to init a vault / print a fresh key
+       * temp key shredded on SIGINT/SIGTERM/SIGHUP too
+       * wizard/session secrets wiped after use; opaque unlock errors;
+         password-session dial timeout
+- [ ] 9. Release tooling (goreleaser, install.sh) — not started
 
 ## Suggestions folded in
 ProxyJump field · host-key pinning w/ loud mismatch warning · TCP probes instead

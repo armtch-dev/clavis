@@ -33,23 +33,29 @@ type Credentials struct {
 }
 
 type TestResult struct {
-	Stage     Stage
-	OK        bool
-	Latency   time.Duration
-	HostKeyFP string // SHA256:… fingerprint observed during the handshake
-	Err       error
-	Reason    string // one-line human explanation for the wizard UI
+	Stage       Stage
+	OK          bool
+	Latency     time.Duration
+	HostKeyFP   string // SHA256:… fingerprint observed during the handshake
+	HostKeyLine string // full public key, authorized_keys format (for pinning)
+	Err         error
+	Reason      string // one-line human explanation for the wizard UI
 }
 
 // ErrHostKeyChanged is wrapped into TestResult.Err when the pinned
 // fingerprint no longer matches — the "someone may be intercepting" case.
 var ErrHostKeyChanged = errors.New("host key changed since it was pinned")
 
-// hostKeyRecorder pins on first use and screams on mismatch.
-func hostKeyRecorder(pinned string, observed *string) ssh.HostKeyCallback {
+// hostKeyRecorder pins on first use and screams on mismatch. observedLine
+// receives the full public key in authorized_keys format so callers can
+// persist it for strict known_hosts pinning of external sessions.
+func hostKeyRecorder(pinned string, observed, observedLine *string) ssh.HostKeyCallback {
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		fp := ssh.FingerprintSHA256(key)
 		*observed = fp
+		if observedLine != nil {
+			*observedLine = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
+		}
 		if pinned != "" && pinned != fp {
 			return fmt.Errorf("%w: pinned %s, server now presents %s", ErrHostKeyChanged, pinned, fp)
 		}
@@ -99,11 +105,11 @@ func Test(p profile.Profile, creds Credentials, timeout time.Duration) TestResul
 	if err != nil {
 		return TestResult{Stage: StageAuth, Err: err, Reason: err.Error()}
 	}
-	var observed string
+	var observed, observedLine string
 	cfg := &ssh.ClientConfig{
 		User:            p.User,
 		Auth:            methods,
-		HostKeyCallback: hostKeyRecorder(p.HostKeyFP, &observed),
+		HostKeyCallback: hostKeyRecorder(p.HostKeyFP, &observed, &observedLine),
 		Timeout:         timeout,
 	}
 
@@ -121,7 +127,7 @@ func Test(p profile.Profile, creds Credentials, timeout time.Duration) TestResul
 	c, chans, reqs, err := ssh.NewClientConn(conn, p.Addr(), cfg)
 	if err != nil {
 		conn.Close()
-		res := TestResult{HostKeyFP: observed, Latency: dialLatency, Err: err}
+		res := TestResult{HostKeyFP: observed, HostKeyLine: observedLine, Latency: dialLatency, Err: err}
 		switch {
 		case errors.Is(err, ErrHostKeyChanged):
 			res.Stage = StageHostKey
@@ -141,14 +147,14 @@ func Test(p profile.Profile, creds Credentials, timeout time.Duration) TestResul
 
 	sess, err := client.NewSession()
 	if err != nil {
-		return TestResult{Stage: StageExec, HostKeyFP: observed, Latency: dialLatency, Err: err, Reason: "authenticated, but opening a session failed: " + err.Error()}
+		return TestResult{Stage: StageExec, HostKeyFP: observed, HostKeyLine: observedLine, Latency: dialLatency, Err: err, Reason: "authenticated, but opening a session failed: " + err.Error()}
 	}
 	defer sess.Close()
 	out, err := sess.Output("echo clavis-ok")
 	if err != nil || !strings.Contains(string(out), "clavis-ok") {
-		return TestResult{Stage: StageExec, HostKeyFP: observed, Latency: dialLatency, Err: err, Reason: "authenticated, but running a command failed"}
+		return TestResult{Stage: StageExec, HostKeyFP: observed, HostKeyLine: observedLine, Latency: dialLatency, Err: err, Reason: "authenticated, but running a command failed"}
 	}
-	return TestResult{Stage: StageOK, OK: true, HostKeyFP: observed, Latency: dialLatency, Reason: fmt.Sprintf("connected and authenticated as %s", p.User)}
+	return TestResult{Stage: StageOK, OK: true, HostKeyFP: observed, HostKeyLine: observedLine, Latency: dialLatency, Reason: fmt.Sprintf("connected and authenticated as %s", p.User)}
 }
 
 func dialReason(err error) string {

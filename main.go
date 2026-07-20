@@ -112,8 +112,13 @@ func buildModel(cfgDir string) (*tui.Model, error) {
 }
 
 // dumpFrame renders a single 100x30 frame to stdout and exits — a debug hook
-// so agents/tests can eyeball layout without a live TTY.
+// so agents/tests can eyeball layout without a live TTY. It refuses to run
+// on an uninitialized config dir: it must never mint a master key and print
+// it into a log.
 func dumpFrame(cfgDir string) error {
+	if _, err := vault.Load(cfgDir); err != nil {
+		return fmt.Errorf("--dump-frame needs an initialized vault (run clavis interactively first): %w", err)
+	}
 	m, err := buildModel(cfgDir)
 	if err != nil {
 		return err

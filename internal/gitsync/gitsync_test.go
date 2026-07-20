@@ -108,6 +108,46 @@ func TestCommitHappyPath(t *testing.T) {
 	}
 }
 
+func TestStagedGuardCatchesSwappedBlob(t *testing.T) {
+	c, v := newRepo(t)
+	if err := v.Put("p1.pass", []byte("secret")); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the TOCTOU race: stage a plaintext blob under a .age name
+	// directly (bypassing Commit's worktree pre-check), then verify the
+	// staged-blob guard refuses it.
+	os.WriteFile(filepath.Join(c.Dir, "vault", "evil.age"), []byte("hunter2-plaintext"), 0o600)
+	if _, err := c.git("add", "vault/evil.age"); err != nil {
+		t.Fatal(err)
+	}
+	err := c.guardStaged()
+	if err == nil || !strings.Contains(err.Error(), "not age ciphertext") {
+		t.Fatalf("guardStaged = %v, want staged-content refusal", err)
+	}
+}
+
+func TestStagedGuardRejectsSymlink(t *testing.T) {
+	c, v := newRepo(t)
+	if err := v.Put("p1.pass", []byte("secret")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(c.Dir, "vault", "p1.pass.age"),
+		filepath.Join(c.Dir, "vault", "link.age")); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	// Worktree guard must reject it up front…
+	if err := c.Guard(); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Guard = %v, want symlink refusal", err)
+	}
+	// …and the staged guard too, if it somehow got staged.
+	if _, err := c.git("add", "vault/link.age"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.guardStaged(); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("guardStaged = %v, want symlink refusal", err)
+	}
+}
+
 func TestSanitizeScrubsToken(t *testing.T) {
 	got := sanitize("fatal: auth failed for https://ghp_SECRET@github.com", "ghp_SECRET")
 	if strings.Contains(got, "ghp_SECRET") {
