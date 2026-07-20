@@ -1,0 +1,11 @@
+# Never commit binaries or local build output
+clavis
+dist/
+
+# Absolute safety net: no plaintext key material ever lands in this repo.
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*.identity
+AGE-SECRET-KEY-*
