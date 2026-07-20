@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/crypto/ssh"
@@ -25,13 +26,23 @@ const (
 	stepUser
 	stepUsePassword // y/n
 	stepPassword
-	stepUseKey // y/n
-	stepKeyPath
+	stepUseKey    // y/n
+	stepKeySource // paste | file
+	stepKeyPaste  // textarea
+	stepKeyPath   // textinput
 	stepPassphrase
 	stepProxyJump
 	stepTags
 	stepTest
 )
+
+// allSteps drives skip logic and the progress dots.
+var allSteps = []wstep{
+	stepName, stepHost, stepPort, stepUser,
+	stepUsePassword, stepPassword,
+	stepUseKey, stepKeySource, stepKeyPaste, stepKeyPath,
+	stepPassphrase, stepProxyJump, stepTags, stepTest,
+}
 
 var stepTitles = map[wstep]string{
 	stepName:        "Profile name",
@@ -41,6 +52,8 @@ var stepTitles = map[wstep]string{
 	stepUsePassword: "Use a password?",
 	stepPassword:    "Password",
 	stepUseKey:      "Use an SSH key?",
+	stepKeySource:   "How should the key be added?",
+	stepKeyPaste:    "Paste the private key",
 	stepKeyPath:     "Path to the private key file",
 	stepPassphrase:  "Key passphrase",
 	stepProxyJump:   "ProxyJump (optional)",
@@ -55,9 +68,11 @@ type wizardModel struct {
 
 	step  wstep
 	input textinput.Model
+	area  textarea.Model
 	errs  string
 
 	usePassword, useKey bool
+	keySource           string // "paste" | "file"
 	password            string
 	keyPEM              []byte
 	passphrase          string
@@ -69,7 +84,7 @@ type wizardModel struct {
 }
 
 func newWizard(app *Model, edit *profile.Profile) *wizardModel {
-	w := &wizardModel{app: app}
+	w := &wizardModel{app: app, keySource: "paste"}
 	if edit != nil {
 		w.editing = true
 		w.draft = *edit
@@ -85,10 +100,27 @@ func newWizard(app *Model, edit *profile.Profile) *wizardModel {
 func (w *wizardModel) setStep(s wstep) {
 	w.step = s
 	w.errs = ""
+
+	if s == stepKeyPaste {
+		ta := textarea.New()
+		ta.Placeholder = "-----BEGIN OPENSSH PRIVATE KEY-----\n…paste the whole key here…\n-----END OPENSSH PRIVATE KEY-----"
+		ta.ShowLineNumbers = false
+		ta.SetWidth(64)
+		ta.SetHeight(9)
+		ta.CharLimit = 0
+		if len(w.keyPEM) > 0 {
+			ta.SetValue(string(w.keyPEM))
+		}
+		ta.Focus()
+		w.area = ta
+		return
+	}
+
 	ti := textinput.New()
-	ti.Prompt = "▸ "
+	ti.Prompt = "› "
 	ti.PromptStyle = theme.Accent
 	ti.TextStyle = theme.Value
+	ti.Cursor.Style = theme.Accent
 	ti.Focus()
 	switch s {
 	case stepName:
@@ -121,62 +153,67 @@ func (w *wizardModel) setStep(s wstep) {
 	w.input = ti
 }
 
-// next returns the step after s, honoring skip rules.
-func (w *wizardModel) next(s wstep) wstep {
-	n := s + 1
-	switch n {
+// skip reports whether a step doesn't apply given the answers so far.
+func (w *wizardModel) skip(s wstep) bool {
+	switch s {
 	case stepPassword:
-		if !w.usePassword {
-			return w.next(n)
-		}
-	case stepPassphrase:
-		if !w.keyNeedsPassphrase {
-			return w.next(n)
-		}
+		return !w.usePassword
+	case stepKeySource:
+		return !w.useKey
+	case stepKeyPaste:
+		return !w.useKey || w.keySource != "paste"
 	case stepKeyPath:
-		if !w.useKey {
-			return w.next(n)
+		return !w.useKey || w.keySource != "file"
+	case stepPassphrase:
+		return !w.keyNeedsPassphrase
+	}
+	return false
+}
+
+func (w *wizardModel) next(s wstep) wstep {
+	for n := s + 1; int(n) < len(allSteps)+int(stepName); n++ {
+		if !w.skip(n) {
+			return n
 		}
 	}
-	return n
+	return stepTest
 }
 
 func (w *wizardModel) prev(s wstep) wstep {
-	if s == stepName {
-		return stepName
-	}
-	p := s - 1
-	switch p {
-	case stepPassword:
-		if !w.usePassword {
-			return w.prev(p)
-		}
-	case stepPassphrase:
-		if !w.keyNeedsPassphrase {
-			return w.prev(p)
-		}
-	case stepKeyPath:
-		if !w.useKey {
-			return w.prev(p)
+	for p := s - 1; p >= stepName; p-- {
+		if !w.skip(p) {
+			return p
 		}
 	}
-	return p
+	return stepName
+}
+
+// sequence is the ordered list of applicable steps, for the progress dots.
+func (w *wizardModel) sequence() []wstep {
+	var seq []wstep
+	for _, s := range allSteps {
+		if !w.skip(s) {
+			seq = append(seq, s)
+		}
+	}
+	return seq
 }
 
 func (m *Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	w := m.wizard
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
+		if w.step == stepKeyPaste {
+			var cmd tea.Cmd
+			w.area, cmd = w.area.Update(msg)
+			return m, cmd
+		}
 		return m, nil
 	}
 
 	if key.Type == tea.KeyEsc {
 		if w.step == stepName || w.awaitingTest {
-			// Abandoning the wizard: drop any typed secrets with it.
-			w.password, w.passphrase = "", ""
-			for i := range w.keyPEM {
-				w.keyPEM[i] = 0
-			}
+			w.wipeSecrets()
 			m.wizard = nil
 			m.screen = scrList
 			return m, nil
@@ -185,7 +222,7 @@ func (m *Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// y/n steps and the final test screen take single keys, not text input.
+	// Choice steps take single keys.
 	switch w.step {
 	case stepUsePassword, stepUseKey:
 		switch key.String() {
@@ -195,8 +232,33 @@ func (m *Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			w.setBool(false)
 		}
 		return m, nil
+	case stepKeySource:
+		switch key.String() {
+		case "p", "P":
+			w.keySource = "paste"
+			w.setStep(w.next(w.step))
+		case "f", "F":
+			w.keySource = "file"
+			w.setStep(w.next(w.step))
+		}
+		return m, nil
 	case stepTest:
 		return w.updateTest(m, key)
+	}
+
+	// Paste step: textarea owns input; ctrl+d confirms.
+	if w.step == stepKeyPaste {
+		if key.Type == tea.KeyCtrlD {
+			if err := w.commitStep(); err != nil {
+				w.errs = err.Error()
+				return m, nil
+			}
+			w.setStep(w.next(w.step))
+			return m, nil
+		}
+		var cmd tea.Cmd
+		w.area, cmd = w.area.Update(msg)
+		return m, cmd
 	}
 
 	if key.Type == tea.KeyEnter {
@@ -233,7 +295,7 @@ func (w *wizardModel) setBool(v bool) {
 	w.setStep(w.next(w.step))
 }
 
-// commitStep validates and stores the current text input into the draft.
+// commitStep validates and stores the current input into the draft.
 func (w *wizardModel) commitStep() error {
 	val := strings.TrimSpace(w.input.Value())
 	switch w.step {
@@ -267,8 +329,17 @@ func (w *wizardModel) commitStep() error {
 			return fmt.Errorf("password is required (or go back and answer n)")
 		}
 		w.password = val
+	case stepKeyPaste:
+		raw := []byte(w.area.Value())
+		if len(strings.TrimSpace(string(raw))) == 0 {
+			if w.editing && w.app.vault.Has(w.draft.KeySecret()) {
+				return nil // keep stored key
+			}
+			return fmt.Errorf("paste a private key, or press esc and choose 'from file'")
+		}
+		return w.acceptKey(raw)
 	case stepKeyPath:
-		return w.loadKey(val)
+		return w.loadKeyFile(val)
 	case stepPassphrase:
 		if _, err := ssh.ParsePrivateKeyWithPassphrase(w.keyPEM, []byte(val)); err != nil {
 			return fmt.Errorf("passphrase does not unlock this key")
@@ -290,10 +361,26 @@ func (w *wizardModel) commitStep() error {
 	return nil
 }
 
-func (w *wizardModel) loadKey(path string) error {
+// acceptKey validates a private key blob (pasted or read from a file) and
+// records whether it needs a passphrase.
+func (w *wizardModel) acceptKey(raw []byte) error {
+	if _, err := ssh.ParsePrivateKey(raw); err != nil {
+		if strings.Contains(err.Error(), "passphrase") {
+			w.keyPEM = raw
+			w.keyNeedsPassphrase = true
+			return nil
+		}
+		return fmt.Errorf("not a valid private key (need PEM/OpenSSH format)")
+	}
+	w.keyPEM = raw
+	w.keyNeedsPassphrase = false
+	return nil
+}
+
+func (w *wizardModel) loadKeyFile(path string) error {
 	if path == "" {
 		if w.editing && w.app.vault.Has(w.draft.KeySecret()) {
-			return nil // keep stored key
+			return nil
 		}
 		return fmt.Errorf("key path is required (or go back and answer n)")
 	}
@@ -305,17 +392,15 @@ func (w *wizardModel) loadKey(path string) error {
 	if err != nil {
 		return fmt.Errorf("cannot read key: %v", err)
 	}
-	if _, err := ssh.ParsePrivateKey(raw); err != nil {
-		if strings.Contains(err.Error(), "passphrase") {
-			w.keyPEM = raw
-			w.keyNeedsPassphrase = true
-			return nil
-		}
-		return fmt.Errorf("not a valid private key: %v", err)
+	return w.acceptKey(raw)
+}
+
+func (w *wizardModel) wipeSecrets() {
+	w.password, w.passphrase = "", ""
+	for i := range w.keyPEM {
+		w.keyPEM[i] = 0
 	}
-	w.keyPEM = raw
-	w.keyNeedsPassphrase = false
-	return nil
+	w.keyPEM = nil
 }
 
 // startTest saves nothing yet — it builds creds from the draft and probes.
@@ -328,7 +413,6 @@ func (w *wizardModel) startTest(m *Model) tea.Cmd {
 		w.draft.Auth = append(w.draft.Auth, profile.AuthKey)
 	}
 	creds := sshx.Credentials{Password: w.password, PrivateKey: w.keyPEM, Passphrase: w.passphrase}
-	// Edit mode with kept secrets: pull them from the vault if unlocked.
 	if w.editing && m.vault.Unlocked() {
 		if creds.Password == "" && w.usePassword {
 			if b, err := m.vault.Get(w.draft.PassSecret()); err == nil {
@@ -360,7 +444,7 @@ func (w *wizardModel) startTest(m *Model) tea.Cmd {
 
 func (w *wizardModel) updateTest(m *Model, key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if w.awaitingTest {
-		return m, nil // wait for the result
+		return m, nil
 	}
 	switch key.String() {
 	case "r", "R":
@@ -389,7 +473,6 @@ func (w *wizardModel) save(m *Model) (tea.Model, tea.Cmd) {
 		w.setStep(stepName)
 		return m, nil
 	}
-	// Secrets: recipient-only encryption, so this works even locked.
 	if w.usePassword && w.password != "" {
 		if err := m.vault.Put(saved.PassSecret(), []byte(w.password)); err != nil {
 			m.setStatus(statusErr, "vault write failed: "+err.Error())
@@ -408,17 +491,11 @@ func (w *wizardModel) save(m *Model) (tea.Model, tea.Cmd) {
 		m.vault.Delete(saved.KeySecret())
 		m.vault.Delete(saved.PassphraseSecret())
 	}
-	// TOFU pin from the wizard's successful test.
 	if w.testResult != nil && w.testResult.OK && saved.HostKeyFP == "" {
 		saved.HostKeyFP = w.testResult.HostKeyFP
 		saved.HostKey = w.testResult.HostKeyLine
 	}
-	// Plaintext copies are no longer needed once they're in the vault.
-	w.password, w.passphrase = "", ""
-	for i := range w.keyPEM {
-		w.keyPEM[i] = 0
-	}
-	w.keyPEM = nil
+	w.wipeSecrets()
 	m.wizard = nil
 	m.screen = scrList
 	m.setStatus(statusOK, "saved "+saved.Name)
@@ -428,36 +505,78 @@ func (w *wizardModel) save(m *Model) (tea.Model, tea.Cmd) {
 // --- view ---
 
 func (w *wizardModel) view(width, height int) string {
-	title := "Add profile"
+	inner := min(width-6, 72)
+	if inner < 30 {
+		inner = 30
+	}
+	dw := inner - 6 // content width inside the panel's horizontal padding
+
+	title := "New profile"
 	if w.editing {
 		title = "Edit " + w.draft.Name
 	}
-	var b strings.Builder
-	b.WriteString(theme.TitleFocused.Render(" "+title+" ") +
-		theme.MutedText.Render(fmt.Sprintf("  step %d/12", int(w.step)+1)) + "\n\n")
 
-	b.WriteString(theme.Label.Render("  "+stepTitles[w.step]) + "\n\n")
+	var b strings.Builder
+	b.WriteString(theme.Title.Render(title) + "\n")
+	b.WriteString(w.progress(inner) + "\n\n")
+	b.WriteString(theme.Label.Render(stepTitles[w.step]) + "\n\n")
 
 	switch w.step {
 	case stepUsePassword, stepUseKey:
-		b.WriteString("  " + theme.Accent.Render("y") + theme.Value.Render(" yes    ") +
-			theme.Accent.Render("n") + theme.Value.Render(" no") + "\n")
+		b.WriteString(choiceRow([][2]string{{"y", "yes"}, {"n", "no"}}))
+	case stepKeySource:
+		b.WriteString(choiceRow([][2]string{{"p", "paste key"}, {"f", "from file"}}))
+		b.WriteString("\n\n" + theme.Hint.Render("Pasted keys are encrypted straight into the vault — the\noriginal file is never referenced again."))
+	case stepKeyPaste:
+		b.WriteString(w.area.View())
 	case stepTest:
 		b.WriteString(w.viewTest())
 	default:
-		b.WriteString("  " + w.input.View() + "\n")
+		b.WriteString(w.input.View())
 	}
 
 	if w.errs != "" {
-		b.WriteString("\n" + theme.StatusErr.Render("  ✗ "+w.errs) + "\n")
+		b.WriteString("\n\n" + theme.StatusErr.Render("✗ "+w.errs))
 	}
-	b.WriteString("\n" + theme.MutedText.Render("  enter next · esc back"))
-	return theme.PanelBorder.Padding(1, 2).Width(min(width-2, 76)).Render(b.String())
+	b.WriteString("\n\n" + theme.Divider(dw))
+	b.WriteString("\n" + w.footer())
+
+	return theme.Panel.Width(inner).Render(b.String())
+}
+
+// progress renders the applicable steps as matte dots.
+func (w *wizardModel) progress(width int) string {
+	seq := w.sequence()
+	var parts []string
+	for _, s := range seq {
+		switch {
+		case s == w.step:
+			parts = append(parts, theme.Accent.Render("●"))
+		case s < w.step:
+			parts = append(parts, theme.Dim.Render("●"))
+		default:
+			parts = append(parts, theme.Hint.Render("·"))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func (w *wizardModel) footer() string {
+	switch w.step {
+	case stepUsePassword, stepUseKey, stepKeySource:
+		return theme.Hint.Render("choose a key · esc back")
+	case stepKeyPaste:
+		return theme.Hint.Render("ctrl+d save key · esc back")
+	case stepTest:
+		return "" // test screen prints its own actions
+	default:
+		return theme.Hint.Render("enter next · esc back")
+	}
 }
 
 func (w *wizardModel) viewTest() string {
 	if w.awaitingTest {
-		return "  " + theme.Accent.Render("⟳ connecting to "+w.draft.Addr()+"…") + "\n"
+		return theme.Accent.Render("connecting to " + w.draft.Addr() + " …")
 	}
 	if w.testResult == nil {
 		return ""
@@ -465,20 +584,36 @@ func (w *wizardModel) viewTest() string {
 	r := w.testResult
 	var b strings.Builder
 	if r.OK {
-		b.WriteString("  " + theme.StatusOK.Render("✓ "+r.Reason) + "\n")
+		b.WriteString(theme.StatusOK.Render("✓ " + r.Reason))
 		if r.HostKeyFP != "" {
-			b.WriteString("  " + theme.MutedText.Render("host key pinned: "+r.HostKeyFP) + "\n")
+			b.WriteString("\n" + theme.Dim.Render("host key pinned  ") + theme.Value.Render(r.HostKeyFP))
 		}
 	} else {
-		b.WriteString("  " + theme.StatusErr.Render("✗ ["+string(r.Stage)+"] "+r.Reason) + "\n")
+		b.WriteString(theme.StatusErr.Render("✗ ["+string(r.Stage)+"]  ") + theme.Value.Render(r.Reason))
 	}
 	if w.draft.ProxyJump != "" {
-		b.WriteString("  " + theme.StatusWarn.Render("note: test dialed directly; ProxyJump applies only to real sessions") + "\n")
+		b.WriteString("\n" + theme.StatusWarn.Render("note: test dials directly; ProxyJump applies to real sessions only"))
 	}
-	b.WriteString("\n  " + theme.Accent.Render("enter") + theme.Value.Render(" save") +
-		theme.Accent.Render("   r") + theme.Value.Render(" retest") +
-		theme.Accent.Render("   b") + theme.Value.Render(" back") + "\n")
+	b.WriteString("\n\n" + hintKeys([][2]string{{"enter", "save"}, {"r", "retest"}, {"b", "back"}}))
 	return b.String()
+}
+
+// choiceRow renders selectable single-key options, e.g.  [y] yes   [n] no
+func choiceRow(opts [][2]string) string {
+	var parts []string
+	for _, o := range opts {
+		parts = append(parts, theme.Accent.Render(o[0])+"  "+theme.Value.Render(o[1]))
+	}
+	return strings.Join(parts, theme.Dim.Render("     "))
+}
+
+// hintKeys renders "key label" pairs for a footer.
+func hintKeys(pairs [][2]string) string {
+	var parts []string
+	for _, p := range pairs {
+		parts = append(parts, theme.Accent.Render(p[0])+" "+theme.Dim.Render(p[1]))
+	}
+	return strings.Join(parts, theme.Dim.Render("   "))
 }
 
 func min(a, b int) int {

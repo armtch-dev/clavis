@@ -51,7 +51,7 @@ The main interface is a list of SSH profiles. Keybindings:
 | Key | Action |
 | --- | --- |
 | `enter` | Connect to the selected host |
-| `a` | Add a profile (step-by-step wizard) |
+| `a` | Add a profile (step-by-step wizard; paste a private key or point to a file) |
 | `e` | Edit the selected profile |
 | `d` | Delete the selected profile and its vault secrets |
 | `t` | Test the connection (dial → handshake → auth → exec) |

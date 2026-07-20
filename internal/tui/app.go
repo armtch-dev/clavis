@@ -443,7 +443,20 @@ func (m *Model) View() string {
 }
 
 func (m *Model) viewStatusBar() string {
-	style := theme.MutedText
+	width := max(m.width, 40)
+	div := theme.Divider(width)
+
+	// Default (no message): a compact, matte keycap hint line.
+	if m.statusMsg == "" && !m.syncing {
+		hint := hintKeys([][2]string{
+			{"enter", "connect"}, {"a", "add"}, {"t", "test"}, {"e", "edit"},
+			{"d", "delete"}, {"s", "sync"}, {"g", "settings"}, {"i", "import"},
+			{"/", "filter"}, {"?", "help"}, {"q", "quit"},
+		})
+		return div + "\n " + hint
+	}
+
+	style := theme.Dim
 	switch m.statusType {
 	case statusOK:
 		style = theme.StatusOK
@@ -454,14 +467,10 @@ func (m *Model) viewStatusBar() string {
 	}
 	msg := m.statusMsg
 	if m.syncing {
-		msg = "⟳ syncing… " + msg
+		msg = "syncing… " + msg
 		style = theme.Accent
 	}
-	if msg == "" {
-		msg = "enter connect · a add · t test · e edit · d delete · s sync · g settings · i import · / filter · ? help · q quit"
-		style = theme.MutedText
-	}
-	return style.MaxWidth(max(m.width, 20)).Render(" " + msg)
+	return div + "\n " + style.MaxWidth(width-1).Render(msg)
 }
 
 func max(a, b int) int {

@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -125,6 +126,30 @@ func dumpFrame(cfgDir string) error {
 	}
 	defer m.Close()
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	// Optional: replay a comma-separated key sequence to preview deeper
+	// screens (e.g. CLAVIS_DUMP_KEYS="a,n,y,p").
+	if seq := os.Getenv("CLAVIS_DUMP_KEYS"); seq != "" {
+		for _, tok := range strings.Split(seq, ",") {
+			m.Update(keyMsgFor(tok))
+		}
+	}
 	fmt.Println(m.View())
 	return nil
+}
+
+func keyMsgFor(tok string) tea.KeyMsg {
+	switch tok {
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
+	case "esc":
+		return tea.KeyMsg{Type: tea.KeyEsc}
+	case "tab":
+		return tea.KeyMsg{Type: tea.KeyTab}
+	case "ctrl+d":
+		return tea.KeyMsg{Type: tea.KeyCtrlD}
+	case "space":
+		return tea.KeyMsg{Type: tea.KeySpace}
+	default:
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tok)}
+	}
 }

@@ -1,9 +1,14 @@
 // Package theme ports the Night Owl palette used by scriptorium
 // (powershell-scripts-tui/src/Core.psm1) so both tools share one look.
+//
+// The visual language here is deliberately flat and matte: square thin
+// borders, muted section headers, no emoji, and colour used sparingly as
+// accent rather than decoration.
 package theme
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -43,25 +48,64 @@ var (
 	BrCyan   = lipgloss.Color(HexBrCyan)
 	Border   = lipgloss.Color(HexBorder)
 
-	// CardBg sits just above the bg — same 4.5% blend toward white scriptorium uses.
+	// CardBg sits just above the bg — same 4.5% blend toward white scriptorium
+	// uses. Faint is a dimmer steel for dividers and hairlines.
 	CardBg = lipgloss.Color(BlendHex(HexBg, HexWhite, 0.045))
+	Faint  = lipgloss.Color(BlendHex(HexBorder, HexBg, 0.45))
 )
 
-// Shared styles. Focused panes get BrCyan titles, unfocused Blue — the same
-// convention scriptorium's Tui.psm1 follows.
+// Core text styles — matte: bold is used only for the single title accent.
 var (
-	TitleFocused   = lipgloss.NewStyle().Foreground(BrCyan).Bold(true)
+	Title = lipgloss.NewStyle().Foreground(BrCyan).Bold(true)
+	// Section is a quiet uppercase-ish label for grouping.
+	Section = lipgloss.NewStyle().Foreground(Muted)
+	Label   = lipgloss.NewStyle().Foreground(Blue)
+	Value   = lipgloss.NewStyle().Foreground(Fg)
+	Accent  = lipgloss.NewStyle().Foreground(BrCyan)
+	Dim     = lipgloss.NewStyle().Foreground(Muted)
+	Hint    = lipgloss.NewStyle().Foreground(Faint)
+
+	StatusOK   = lipgloss.NewStyle().Foreground(Green)
+	StatusWarn = lipgloss.NewStyle().Foreground(BrYellow)
+	StatusErr  = lipgloss.NewStyle().Foreground(Red)
+
+	// MutedText kept for existing callers; equivalent to Dim.
+	MutedText = Dim
+
+	// Selected row: matte fill, no bold, paired with SelTick on the left.
+	Selected = lipgloss.NewStyle().Background(SelBg).Foreground(White)
+	SelTick  = lipgloss.NewStyle().Foreground(BrCyan)
+
+	// Chip is a small metadata tag (auth kind, count) — muted, understated.
+	Chip = lipgloss.NewStyle().Foreground(Muted)
+	Tag  = lipgloss.NewStyle().Foreground(Blue)
+
+	// Panel is a flat modal container: square thin border, generous padding.
+	Panel = lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(Border).
+		Padding(1, 3)
+
+	// PanelBorder kept for existing callers (square, matte).
+	PanelBorder = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(Border)
+
+	// Compatibility aliases.
+	TitleFocused   = Title
 	TitleUnfocused = lipgloss.NewStyle().Foreground(Blue)
-	PanelBorder    = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(Border)
-	StatusOK       = lipgloss.NewStyle().Foreground(Green)
-	StatusWarn     = lipgloss.NewStyle().Foreground(BrYellow)
-	StatusErr      = lipgloss.NewStyle().Foreground(Red)
-	MutedText      = lipgloss.NewStyle().Foreground(Muted)
-	Selected       = lipgloss.NewStyle().Background(SelBg).Foreground(White).Bold(true)
-	Label          = lipgloss.NewStyle().Foreground(Blue)
-	Value          = lipgloss.NewStyle().Foreground(Fg)
-	Accent         = lipgloss.NewStyle().Foreground(BrCyan)
 )
+
+// Divider returns a full-width hairline in the faint steel colour.
+func Divider(width int) string {
+	if width < 1 {
+		width = 1
+	}
+	return lipgloss.NewStyle().Foreground(Faint).Render(strings.Repeat("─", width))
+}
+
+// Key renders a keycap-style hint (e.g. the "a" in "a add").
+func Key(s string) string { return Accent.Render(s) }
 
 // LatencyColor maps a round-trip time in ms onto the palette's heat ramp.
 func LatencyColor(ms float64) lipgloss.Color {

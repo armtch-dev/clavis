@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -23,8 +22,9 @@ type unlockModel struct {
 
 func newUnlock(v *vault.Vault) unlockModel {
 	ti := textinput.New()
-	ti.Prompt = "▸ "
+	ti.Prompt = "› "
 	ti.PromptStyle = theme.Accent
+	ti.Cursor.Style = theme.Accent
 	ti.EchoMode = textinput.EchoPassword
 	ti.Placeholder = "AGE-SECRET-KEY-…"
 	ti.Focus()
@@ -61,15 +61,16 @@ func (m *Model) updateUnlock(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (u unlockModel) view(w, h int) string {
 	var b strings.Builder
-	b.WriteString(theme.TitleFocused.Render(" unlock vault ") + "\n\n")
-	b.WriteString(theme.Value.Render("Paste your master key to decrypt stored credentials.") + "\n\n")
+	b.WriteString(theme.Title.Render("Unlock vault") + "\n\n")
+	b.WriteString(theme.Dim.Render("Paste your master key to decrypt stored credentials.") + "\n\n")
 	b.WriteString(u.input.View() + "\n")
 	if u.errs != "" {
 		b.WriteString("\n" + theme.StatusErr.Render("✗ "+u.errs) + "\n")
 	}
-	b.WriteString("\n" + theme.MutedText.Render("enter unlock · esc browse locked (no connect/test)"))
-	b.WriteString("\n" + theme.MutedText.Render("lost the key? run: clavis vault reset"))
-	return center(theme.PanelBorder.Padding(1, 3).Render(b.String()), w, h)
+	b.WriteString("\n" + theme.Divider(50) + "\n")
+	b.WriteString(hintKeys([][2]string{{"enter", "unlock"}, {"esc", "browse locked"}}) + "\n")
+	b.WriteString(theme.Hint.Render("lost the key?  clavis vault reset"))
+	return center(theme.Panel.Width(56).Render(b.String()), w, h)
 }
 
 // --- first-run key banner ---
@@ -110,18 +111,20 @@ func (m *Model) updateFirstRun(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (k keyBannerModel) view(w, h int) string {
 	var b strings.Builder
-	b.WriteString(theme.StatusWarn.Bold(true).Render("YOUR MASTER KEY — SHOWN ONLY ONCE") + "\n\n")
-	b.WriteString(theme.Value.Render("Everything in the vault is encrypted to this key. clavis does NOT store it.") + "\n")
-	b.WriteString(theme.Value.Render("Copy it somewhere OUTSIDE this machine (password manager, printed, USB).") + "\n")
-	b.WriteString(theme.Value.Render("If you lose it, stored passwords/keys cannot be recovered — only reset.") + "\n\n")
-	b.WriteString(theme.Accent.Bold(true).Render("  "+k.identity) + "\n\n")
+	b.WriteString(theme.Title.Render("Master key") + theme.Dim.Render("   shown only once") + "\n\n")
+	b.WriteString(theme.Value.Render("Everything in the vault is encrypted to this key. clavis does not") + "\n")
+	b.WriteString(theme.Value.Render("store it. Copy it somewhere off this machine — a password") + "\n")
+	b.WriteString(theme.Value.Render("manager, printed, a USB stick. Lose it and stored credentials") + "\n")
+	b.WriteString(theme.Value.Render("cannot be recovered, only reset.") + "\n\n")
+	b.WriteString(theme.Accent.Render(k.identity) + "\n\n")
+	b.WriteString(theme.Divider(64) + "\n")
 	if k.saved {
-		b.WriteString(theme.StatusOK.Render("✓ also cached in macOS Keychain (auto-unlock on this Mac)") + "\n\n")
+		b.WriteString(theme.StatusOK.Render("✓ cached in macOS Keychain (auto-unlock on this Mac)") + "\n")
 	} else {
-		b.WriteString(theme.MutedText.Render("k = also cache in macOS Keychain (convenient, but keeps a copy on this Mac)") + "\n\n")
+		b.WriteString(hintKeys([][2]string{{"k", "also cache in macOS Keychain"}}) + "\n")
 	}
-	b.WriteString(theme.MutedText.Render("enter = I stored it safely, continue"))
-	return center(theme.PanelBorder.Padding(1, 3).Render(b.String()), w, h)
+	b.WriteString(hintKeys([][2]string{{"enter", "I stored it safely — continue"}}))
+	return center(theme.Panel.Width(70).Render(b.String()), w, h)
 }
 
 // --- settings screen ---
@@ -163,8 +166,9 @@ func newSettings(app *Model) *settingsModel {
 
 func (s *settingsModel) textStep(step sstep, placeholder string, masked bool) {
 	ti := textinput.New()
-	ti.Prompt = "▸ "
+	ti.Prompt = "› "
 	ti.PromptStyle = theme.Accent
+	ti.Cursor.Style = theme.Accent
 	ti.Placeholder = placeholder
 	if masked {
 		ti.EchoMode = textinput.EchoPassword
@@ -309,59 +313,60 @@ func (m *Model) settingsKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (s *settingsModel) view(w, h int) string {
+	inner := min(w-6, 70)
+	if inner < 34 {
+		inner = 34
+	}
+	dw := inner - 6
 	var b strings.Builder
-	b.WriteString(theme.TitleFocused.Render(" settings — git sync ") + "\n\n")
+	b.WriteString(theme.Title.Render("Settings") + theme.Dim.Render("   git sync") + "\n\n")
 
 	switch s.step {
 	case sToken, sRemoteURL, sRepoName:
 		prompts := map[sstep]string{
-			sToken:     "GitHub personal access token (needs repo scope):",
-			sRemoteURL: "Existing repo URL:",
-			sRepoName:  "Name for the new PRIVATE repo:",
+			sToken:     "GitHub personal access token (needs repo scope)",
+			sRemoteURL: "Existing repo URL",
+			sRepoName:  "Name for the new private repo",
 		}
-		b.WriteString(theme.Label.Render("  "+prompts[s.step]) + "\n\n  " + s.input.View() + "\n")
+		b.WriteString(theme.Label.Render(prompts[s.step]) + "\n\n" + s.input.View() + "\n")
 	case sConfirmCreate:
-		b.WriteString(theme.StatusWarn.Render("  Create private GitHub repo \""+s.pending+"\"?") + "\n\n")
-		b.WriteString(theme.Value.Render("  It will receive: profiles.json, config.json, vault.meta,") + "\n")
-		b.WriteString(theme.Value.Render("  and vault/*.age (age-encrypted secrets). Nothing plaintext,") + "\n")
-		b.WriteString(theme.Value.Render("  never your master key, never your GitHub token.") + "\n\n")
-		b.WriteString(theme.Accent.Render("  y") + theme.Value.Render(" create + push   ") +
-			theme.Accent.Render("any key") + theme.Value.Render(" cancel") + "\n")
+		b.WriteString(theme.StatusWarn.Render("Create private GitHub repo “"+s.pending+"”?") + "\n\n")
+		b.WriteString(theme.Value.Render("It receives profiles.json, config.json, vault.meta and") + "\n")
+		b.WriteString(theme.Value.Render("vault/*.age (encrypted secrets). Never your master key,") + "\n")
+		b.WriteString(theme.Value.Render("never your GitHub token, nothing in plaintext.") + "\n\n")
+		b.WriteString(hintKeys([][2]string{{"y", "create + push"}, {"esc", "cancel"}}) + "\n")
 	default:
-		line := func(k, label, val string) {
-			b.WriteString(fmt.Sprintf("  %s %s %s\n",
-				theme.Accent.Render(k), theme.Label.Width(28).Render(label), theme.Value.Render(val)))
+		row := func(k, label, val string) {
+			b.WriteString("  " + theme.Accent.Render(k) + "  " +
+				theme.Label.Width(30).Render(label) + theme.Value.Render(val) + "\n")
 		}
 		cfg := s.app.cfg
-		tok := "not set"
+		tok := theme.Dim.Render("not set")
 		if s.app.vault.HasLocal("github-token") {
 			tok = "set"
 		}
 		if s.login != "" {
 			tok = "@" + s.login
 		}
-		remote := cfg.Sync.Remote
-		if remote == "" {
-			remote = "not set"
-		} else {
-			remote = shortRemote(remote)
+		remote := theme.Dim.Render("not set")
+		if cfg.Sync.Remote != "" {
+			remote = shortRemote(cfg.Sync.Remote)
 		}
-		line("t", "GitHub token (this machine)", tok)
-		line("u", "use existing repo URL", remote)
-		line("c", "create new private repo", "")
-		line("a", "autosync on every change", onOff(cfg.Sync.AutoSync))
-		line("k", "cache master key in Keychain", onOff(cfg.KeychainOptIn))
-		line("s", "sync now", "")
-		b.WriteString("\n")
+		row("t", "GitHub token (this machine)", tok)
+		row("u", "use existing repo URL", remote)
+		row("c", "create new private repo", "")
+		row("a", "autosync on every change", onOff(cfg.Sync.AutoSync))
+		row("k", "cache master key in Keychain", onOff(cfg.KeychainOptIn))
+		row("s", "sync now", "")
 	}
 	if s.errs != "" {
-		b.WriteString("\n" + theme.StatusErr.Render("  ✗ "+s.errs) + "\n")
+		b.WriteString("\n" + theme.StatusErr.Render("✗ "+s.errs) + "\n")
 	}
 	if s.busy {
-		b.WriteString("\n" + theme.Accent.Render("  ⟳ talking to GitHub…") + "\n")
+		b.WriteString("\n" + theme.Accent.Render("talking to GitHub…") + "\n")
 	}
-	b.WriteString("\n" + theme.MutedText.Render("  esc back"))
-	return theme.PanelBorder.Padding(1, 2).Width(min(w-2, 76)).Render(b.String())
+	b.WriteString("\n" + theme.Divider(dw) + "\n" + theme.Hint.Render("esc back"))
+	return theme.Panel.Width(inner).Render(b.String())
 }
 
 func onOff(v bool) string {

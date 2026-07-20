@@ -194,47 +194,51 @@ func (m *Model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (c confirmModel) view(w, h int) string {
-	box := theme.PanelBorder.Padding(1, 3).Render(
-		theme.StatusErr.Bold(true).Render("Delete "+c.name+"?") + "\n\n" +
-			theme.Value.Render("Its password/key will be removed from the vault.") + "\n\n" +
-			theme.MutedText.Render("y = delete   any other key = cancel"))
+	box := theme.Panel.Width(46).Render(
+		theme.StatusErr.Render("Delete "+c.name) + "\n\n" +
+			theme.Value.Render("Its password and key will be removed from the vault.") + "\n\n" +
+			theme.Divider(40) + "\n" +
+			hintKeys([][2]string{{"y", "delete"}, {"esc", "cancel"}}))
 	return center(box, w, h)
 }
 
 // --- list rendering ---
 
 func (m *Model) viewList() string {
-	title := " clavis ⚿ ssh "
-	titleStyle := theme.TitleFocused
+	width := max(m.width, 40)
 	var b strings.Builder
 
-	head := titleStyle.Render(title)
+	// Header: title on the left, quiet meta on the right.
+	left := theme.Title.Render("clavis")
 	if m.filtering || m.filter != "" {
-		head += theme.Accent.Render("  /" + m.filter)
+		cursor := ""
 		if m.filtering {
-			head += theme.Accent.Render("▌")
+			cursor = theme.Accent.Render("▌")
 		}
+		left += theme.Dim.Render("  filter ") + theme.Value.Render(m.filter) + cursor
+	}
+	var meta []string
+	if !m.vault.Unlocked() {
+		meta = append(meta, theme.StatusWarn.Render("locked"))
 	}
 	if m.cfg.Sync.Remote != "" {
-		head += theme.MutedText.Render("  ⇅ " + shortRemote(m.cfg.Sync.Remote))
+		meta = append(meta, theme.Dim.Render("sync ")+theme.Value.Render(shortRemote(m.cfg.Sync.Remote)))
 	}
-	if !m.vault.Unlocked() {
-		head += theme.StatusWarn.Render("  🔒 locked")
-	}
-	b.WriteString(head + "\n")
-	b.WriteString(theme.MutedText.Render(strings.Repeat("─", max(m.width-1, 10))) + "\n")
+	b.WriteString(spread(left, strings.Join(meta, theme.Dim.Render("  ·  ")), width) + "\n")
+	b.WriteString(theme.Divider(width) + "\n")
 
 	vis := m.visible()
 	if len(vis) == 0 {
-		empty := "no profiles yet — press a to add one, or i to import from ~/.ssh/config"
+		empty := "No profiles yet.  Press " + theme.Key("a") + theme.Dim.Render(" to add one, or ") +
+			theme.Key("i") + theme.Dim.Render(" to import from ~/.ssh/config.")
 		if m.filter != "" {
-			empty = "nothing matches /" + m.filter
+			empty = theme.Dim.Render("Nothing matches “" + m.filter + "”.")
 		}
-		b.WriteString("\n" + theme.MutedText.Render("  "+empty) + "\n")
+		b.WriteString("\n" + theme.Dim.Render("  ") + empty + "\n")
 		return b.String()
 	}
 
-	rows := m.height - 5 // header + rule + status bar + margin
+	rows := m.height - 5
 	if rows < 3 {
 		rows = 3
 	}
@@ -242,66 +246,80 @@ func (m *Model) viewList() string {
 	if m.cursor >= rows {
 		start = m.cursor - rows + 1
 	}
-	nameW := 24
+	nameW := 22
 	for i := start; i < len(vis) && i < start+rows; i++ {
-		p := vis[i]
-		b.WriteString(m.renderRow(p, i == m.cursor, nameW) + "\n")
+		b.WriteString(m.renderRow(vis[i], i == m.cursor, nameW, width) + "\n")
 	}
 	if len(vis) > rows {
-		b.WriteString(theme.MutedText.Render(fmt.Sprintf("  … %d/%d", m.cursor+1, len(vis))))
+		b.WriteString(theme.Dim.Render(fmt.Sprintf("  %d–%d of %d", start+1, min(start+rows, len(vis)), len(vis))))
 	}
 	return b.String()
 }
 
-func (m *Model) renderRow(p profile.Profile, selected bool, nameW int) string {
+func (m *Model) renderRow(p profile.Profile, selected bool, nameW, width int) string {
 	st, have := m.statuses[p.ID]
 
-	dot, latency := theme.MutedText.Render("●"), theme.MutedText.Render("   …  ")
+	dotColor, dot, latency := theme.Muted, "•", "     ·"
 	if have {
 		if st.Reachable {
-			c := lipgloss.NewStyle().Foreground(theme.LatencyColor(st.LatencyMs))
-			dot = c.Render("●")
-			latency = c.Render(fmt.Sprintf("%5.0fms", st.LatencyMs))
+			dotColor = theme.LatencyColor(st.LatencyMs)
+			dot = "•"
+			latency = fmt.Sprintf("%4.0fms", st.LatencyMs)
 		} else {
-			dot = theme.StatusErr.Render("○")
-			latency = theme.StatusErr.Render("  down ")
+			dotColor, dot, latency = theme.Red, "◦", "  down"
 		}
 	}
-	spark := sparkline(st.History, 12)
+	dotCell := lipgloss.NewStyle().Foreground(dotColor).Render(dot)
+	latCell := lipgloss.NewStyle().Foreground(dotColor).Width(6).Align(lipgloss.Right).Render(latency)
+	sparkCell := lipgloss.NewStyle().Width(12).Render(sparkline(st.History, 12))
 
 	name := p.Name
 	if len(name) > nameW {
 		name = name[:nameW-1] + "…"
 	}
+	nameCell := theme.Value.Width(nameW).Render(name)
+
 	target := fmt.Sprintf("%s@%s", p.User, p.Host)
 	if p.Port != 22 {
 		target += fmt.Sprintf(":%d", p.Port)
 	}
-	auth := ""
+	endpointCell := theme.Dim.Width(26).Render(target)
+
+	var auth []string
 	if p.HasAuth(profile.AuthKey) {
-		auth += "⚿"
+		auth = append(auth, "key")
 	}
 	if p.HasAuth(profile.AuthPassword) {
-		auth += "🔑"
+		auth = append(auth, "pwd")
 	}
-	tags := ""
+	authCell := theme.Chip.Width(9).Render(strings.Join(auth, " "))
+
+	trailing := ""
 	if len(p.Tags) > 0 {
-		tags = " #" + strings.Join(p.Tags, " #")
+		trailing = theme.Tag.Render("#" + strings.Join(p.Tags, " #"))
 	}
-	testing := ""
 	if m.testing[p.ID] {
-		testing = theme.Accent.Render(" testing…")
+		trailing = theme.Accent.Render("testing…")
 	}
 
-	line := fmt.Sprintf(" %s %s %s  %-*s %s %s%s%s",
-		dot, latency, spark, nameW, name,
-		theme.MutedText.Render(auth), theme.Value.Render(target),
-		theme.MutedText.Render(tags), testing)
+	cells := []string{dotCell, latCell, sparkCell, nameCell, endpointCell, authCell, trailing}
+	line := "  " + strings.Join(cells, "  ")
 
 	if selected {
-		return theme.Selected.MaxWidth(max(m.width, 20)).Render("▸" + line)
+		body := lipgloss.NewStyle().Background(theme.SelBg).Foreground(theme.White).
+			Width(max(width-1, 20)).Render(line)
+		return theme.SelTick.Render("▎") + body
 	}
 	return " " + line
+}
+
+// spread lays out left and right on one line padded to width.
+func spread(left, right string, width int) string {
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
 }
 
 var sparkBlocks = []rune("▁▂▃▄▅▆▇█")
@@ -320,14 +338,16 @@ func sparkline(hist []float64, n int) string {
 	var b strings.Builder
 	for _, v := range hist {
 		if v < 0 {
-			b.WriteString(theme.StatusErr.Render("×"))
+			b.WriteString(theme.Dim.Render("╵"))
 			continue
 		}
 		idx := 0
 		if maxV > 0 {
 			idx = int(v / maxV * float64(len(sparkBlocks)-1))
 		}
-		b.WriteString(lipgloss.NewStyle().Foreground(theme.LatencyColor(v)).Render(string(sparkBlocks[idx])))
+		// Matte: a single muted foreground for the trend, not a heat ramp —
+		// the dot + latency already carry the colour signal.
+		b.WriteString(theme.Chip.Render(string(sparkBlocks[idx])))
 	}
 	for i := len(hist); i < n; i++ {
 		b.WriteString(" ")
@@ -353,22 +373,26 @@ func (m *Model) viewHelp() string {
 		{"enter", "connect to the selected host"},
 		{"a", "add a profile (step-by-step wizard)"},
 		{"e", "edit the selected profile"},
-		{"d", "delete the selected profile (and its vault secrets)"},
-		{"t", "test the connection (dial → handshake → auth → exec)"},
+		{"d", "delete the selected profile and its vault secrets"},
+		{"t", "test the connection (dial, handshake, auth, exec)"},
 		{"s", "sync now (guarded, encrypted git push)"},
-		{"g", "settings: GitHub token, repo, autosync, keychain"},
+		{"g", "settings — GitHub token, repo, autosync, keychain"},
 		{"i", "import hosts from ~/.ssh/config"},
 		{"/", "filter profiles"},
-		{"j/k ↑/↓", "move"},
+		{"j k ↑ ↓", "move"},
 		{"q", "quit"},
 	}
 	var b strings.Builder
-	b.WriteString(theme.TitleFocused.Render(" clavis — keys ") + "\n\n")
+	b.WriteString(theme.Title.Render("Keys") + "\n\n")
 	for _, r := range rows {
-		b.WriteString(fmt.Sprintf("  %s  %s\n",
-			theme.Accent.Width(10).Render(r[0]), theme.Value.Render(r[1])))
+		b.WriteString("  " + theme.Accent.Width(9).Render(r[0]) + theme.Value.Render(r[1]) + "\n")
 	}
-	b.WriteString("\n" + theme.MutedText.Render("  status dots: ● <50ms green · <200ms yellow · slower red · ○ unreachable"))
-	b.WriteString("\n" + theme.MutedText.Render("  any key to close"))
-	return theme.PanelBorder.Padding(1, 2).Render(b.String())
+	b.WriteString("\n" + theme.Divider(62) + "\n")
+	b.WriteString(theme.Dim.Render("reachability  ") +
+		lipgloss.NewStyle().Foreground(theme.Green).Render("• ") + theme.Dim.Render("<50ms   ") +
+		lipgloss.NewStyle().Foreground(theme.BrYellow).Render("• ") + theme.Dim.Render("<200ms   ") +
+		lipgloss.NewStyle().Foreground(theme.Red).Render("• ") + theme.Dim.Render("slower   ") +
+		lipgloss.NewStyle().Foreground(theme.Red).Render("◦ ") + theme.Dim.Render("down") + "\n")
+	b.WriteString(theme.Hint.Render("any key to close"))
+	return theme.Panel.Width(68).Render(b.String())
 }
