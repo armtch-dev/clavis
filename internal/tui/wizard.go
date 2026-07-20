@@ -519,7 +519,7 @@ func (w *wizardModel) view(width, height int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render(title) + "\n")
 	b.WriteString(w.progress(inner) + "\n\n")
-	b.WriteString(theme.Label.Render(stepTitles[w.step]) + "\n\n")
+	b.WriteString(theme.Label.Render(stepIcon(w.step)+stepTitles[w.step]) + "\n\n")
 
 	switch w.step {
 	case stepUsePassword, stepUseKey:
@@ -596,6 +596,17 @@ func (w *wizardModel) viewTest() string {
 	}
 	b.WriteString("\n\n" + hintKeys([][2]string{{"enter", "save"}, {"r", "retest"}, {"b", "back"}}))
 	return b.String()
+}
+
+// stepIcon prefixes auth steps with the matching uniform glyph.
+func stepIcon(s wstep) string {
+	switch s {
+	case stepUsePassword, stepPassword:
+		return theme.IconPwd + "  "
+	case stepUseKey, stepKeySource, stepKeyPaste, stepKeyPath, stepPassphrase:
+		return theme.IconKey + "  "
+	}
+	return ""
 }
 
 // choiceRow renders selectable single-key options, e.g.  [y] yes   [n] no

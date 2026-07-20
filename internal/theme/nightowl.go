@@ -1,9 +1,9 @@
 // Package theme ports the Night Owl palette used by scriptorium
 // (powershell-scripts-tui/src/Core.psm1) so both tools share one look.
 //
-// The visual language here is deliberately flat and matte: square thin
-// borders, muted section headers, no emoji, and colour used sparingly as
-// accent rather than decoration.
+// The visual language here is flat, matte, and uniform: square thin borders,
+// muted section headers, and a single monochrome icon family (no colour
+// emoji) drawn from the same dingbat/geometric glyphs scriptorium uses.
 package theme
 
 import (
@@ -32,6 +32,22 @@ const (
 	HexBorder   = "#5f7e97" // Night Owl panel border (steel blue)
 )
 
+// Uniform monochrome icon set. The ︎ text-presentation selector forces
+// flat (non-emoji) rendering on glyphs that some terminals would colourise.
+const (
+	IconKey     = "⚿︎" // ⚿ squared key — key auth
+	IconPwd     = "✱"  // ✱ heavy asterisk — masked password
+	IconGear    = "⚙︎" // ⚙ settings
+	IconSync    = "⇅"  // ⇅ sync
+	IconLock    = "⚠︎" // ⚠ vault locked
+	IconOK      = "✓"  // ✓
+	IconErr     = "✗"  // ✗
+	IconPointer = "▸"  // ▸ selection pointer
+	IconUp      = "●"  // ● reachable
+	IconDown    = "○"  // ○ unreachable
+	IconIdle    = "·"  // · unknown / no data
+)
+
 var (
 	Bg       = lipgloss.Color(HexBg)
 	Fg       = lipgloss.Color(HexFg)
@@ -56,8 +72,7 @@ var (
 
 // Core text styles — matte: bold is used only for the single title accent.
 var (
-	Title = lipgloss.NewStyle().Foreground(BrCyan).Bold(true)
-	// Section is a quiet uppercase-ish label for grouping.
+	Title   = lipgloss.NewStyle().Foreground(BrCyan).Bold(true)
 	Section = lipgloss.NewStyle().Foreground(Muted)
 	Label   = lipgloss.NewStyle().Foreground(Blue)
 	Value   = lipgloss.NewStyle().Foreground(Fg)
@@ -72,11 +87,11 @@ var (
 	// MutedText kept for existing callers; equivalent to Dim.
 	MutedText = Dim
 
-	// Selected row: matte fill, no bold, paired with SelTick on the left.
+	// Selected row: matte fill, no bold, paired with a pointer on the left.
 	Selected = lipgloss.NewStyle().Background(SelBg).Foreground(White)
 	SelTick  = lipgloss.NewStyle().Foreground(BrCyan)
 
-	// Chip is a small metadata tag (auth kind, count) — muted, understated.
+	// Chip is a small metadata glyph (auth kind) — muted, understated.
 	Chip = lipgloss.NewStyle().Foreground(Muted)
 	Tag  = lipgloss.NewStyle().Foreground(Blue)
 

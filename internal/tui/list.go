@@ -219,10 +219,10 @@ func (m *Model) viewList() string {
 	}
 	var meta []string
 	if !m.vault.Unlocked() {
-		meta = append(meta, theme.StatusWarn.Render("locked"))
+		meta = append(meta, theme.StatusWarn.Render(theme.IconLock+" locked"))
 	}
 	if m.cfg.Sync.Remote != "" {
-		meta = append(meta, theme.Dim.Render("sync ")+theme.Value.Render(shortRemote(m.cfg.Sync.Remote)))
+		meta = append(meta, theme.Dim.Render(theme.IconSync+" ")+theme.Value.Render(shortRemote(m.cfg.Sync.Remote)))
 	}
 	b.WriteString(spread(left, strings.Join(meta, theme.Dim.Render("  ·  ")), width) + "\n")
 	b.WriteString(theme.Divider(width) + "\n")
@@ -259,14 +259,14 @@ func (m *Model) viewList() string {
 func (m *Model) renderRow(p profile.Profile, selected bool, nameW, width int) string {
 	st, have := m.statuses[p.ID]
 
-	dotColor, dot, latency := theme.Muted, "•", "     ·"
+	dotColor, dot, latency := theme.Muted, theme.IconIdle, "     ·"
 	if have {
 		if st.Reachable {
 			dotColor = theme.LatencyColor(st.LatencyMs)
-			dot = "•"
+			dot = theme.IconUp
 			latency = fmt.Sprintf("%4.0fms", st.LatencyMs)
 		} else {
-			dotColor, dot, latency = theme.Red, "◦", "  down"
+			dotColor, dot, latency = theme.Red, theme.IconDown, "  down"
 		}
 	}
 	dotCell := lipgloss.NewStyle().Foreground(dotColor).Render(dot)
@@ -287,12 +287,12 @@ func (m *Model) renderRow(p profile.Profile, selected bool, nameW, width int) st
 
 	var auth []string
 	if p.HasAuth(profile.AuthKey) {
-		auth = append(auth, "key")
+		auth = append(auth, theme.IconKey)
 	}
 	if p.HasAuth(profile.AuthPassword) {
-		auth = append(auth, "pwd")
+		auth = append(auth, theme.IconPwd)
 	}
-	authCell := theme.Chip.Width(9).Render(strings.Join(auth, " "))
+	authCell := theme.Chip.Width(5).Render(strings.Join(auth, " "))
 
 	trailing := ""
 	if len(p.Tags) > 0 {
@@ -308,7 +308,7 @@ func (m *Model) renderRow(p profile.Profile, selected bool, nameW, width int) st
 	if selected {
 		body := lipgloss.NewStyle().Background(theme.SelBg).Foreground(theme.White).
 			Width(max(width-1, 20)).Render(line)
-		return theme.SelTick.Render("▎") + body
+		return theme.SelTick.Render(theme.IconPointer) + body
 	}
 	return " " + line
 }
@@ -388,11 +388,15 @@ func (m *Model) viewHelp() string {
 		b.WriteString("  " + theme.Accent.Width(9).Render(r[0]) + theme.Value.Render(r[1]) + "\n")
 	}
 	b.WriteString("\n" + theme.Divider(62) + "\n")
-	b.WriteString(theme.Dim.Render("reachability  ") +
-		lipgloss.NewStyle().Foreground(theme.Green).Render("• ") + theme.Dim.Render("<50ms   ") +
-		lipgloss.NewStyle().Foreground(theme.BrYellow).Render("• ") + theme.Dim.Render("<200ms   ") +
-		lipgloss.NewStyle().Foreground(theme.Red).Render("• ") + theme.Dim.Render("slower   ") +
-		lipgloss.NewStyle().Foreground(theme.Red).Render("◦ ") + theme.Dim.Render("down") + "\n")
+	dot := func(c lipgloss.Color) string { return lipgloss.NewStyle().Foreground(c).Render(theme.IconUp) }
+	b.WriteString(theme.Dim.Render("reach  ") +
+		dot(theme.Green) + theme.Dim.Render(" <50ms  ") +
+		dot(theme.BrYellow) + theme.Dim.Render(" <200ms  ") +
+		dot(theme.Red) + theme.Dim.Render(" slower  ") +
+		lipgloss.NewStyle().Foreground(theme.Red).Render(theme.IconDown) + theme.Dim.Render(" down") + "\n")
+	b.WriteString(theme.Dim.Render("auth   ") +
+		theme.Chip.Render(theme.IconKey) + theme.Dim.Render(" key    ") +
+		theme.Chip.Render(theme.IconPwd) + theme.Dim.Render(" password") + "\n")
 	b.WriteString(theme.Hint.Render("any key to close"))
 	return theme.Panel.Width(68).Render(b.String())
 }

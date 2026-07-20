@@ -319,7 +319,7 @@ func (s *settingsModel) view(w, h int) string {
 	}
 	dw := inner - 6
 	var b strings.Builder
-	b.WriteString(theme.Title.Render("Settings") + theme.Dim.Render("   git sync") + "\n\n")
+	b.WriteString(theme.Title.Render(theme.IconGear+" Settings") + theme.Dim.Render("   git sync") + "\n\n")
 
 	switch s.step {
 	case sToken, sRemoteURL, sRepoName:
