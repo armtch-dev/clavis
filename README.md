@@ -6,7 +6,15 @@ Clavis walks you through a step-by-step profile wizard to record SSH hosts. It k
 
 ## Install
 
-macOS and Linux (needs git, Go 1.26+, and the OpenSSH client):
+macOS and Linux (needs git, Go 1.26+, and the OpenSSH client).
+
+One line, using your GitHub SSH access (the repo is private):
+
+```bash
+git clone --depth 1 git@github.com:armtch-dev/clavis.git /tmp/clavis && /tmp/clavis/install.sh && rm -rf /tmp/clavis
+```
+
+If the repo is ever made public, this shorter form works too:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/armtch-dev/clavis/main/install.sh | bash

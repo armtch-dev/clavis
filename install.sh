@@ -21,10 +21,15 @@ command -v git >/dev/null 2>&1 || fail "git is required"
 command -v go  >/dev/null 2>&1 || fail "Go is required (https://go.dev/dl — 1.26+)"
 command -v ssh >/dev/null 2>&1 || fail "OpenSSH client (ssh) is required"
 
-# Build from the current checkout if we're inside one; otherwise clone.
+# Build from a local checkout when possible: the dir this script lives in,
+# or the current dir. Otherwise clone (needs repo access if private).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/nonexistent}")" 2>/dev/null && pwd || true)"
 SRC=""
 CLEANUP=""
-if [ -f "go.mod" ] && grep -q "armtch-dev/clavis" go.mod 2>/dev/null; then
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/go.mod" ] && grep -q "armtch-dev/clavis" "$SCRIPT_DIR/go.mod" 2>/dev/null; then
+  SRC="$SCRIPT_DIR"
+  say "building from local checkout: $SRC"
+elif [ -f "go.mod" ] && grep -q "armtch-dev/clavis" go.mod 2>/dev/null; then
   SRC="$PWD"
   say "building from local checkout: $SRC"
 else
