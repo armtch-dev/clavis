@@ -6,12 +6,21 @@ Clavis walks you through a step-by-step profile wizard to record SSH hosts. It k
 
 ## Install
 
+macOS and Linux (needs git, Go 1.26+, and the OpenSSH client):
+
 ```bash
-go build -o clavis .
-mv clavis ~/bin  # or wherever is in your PATH
+curl -fsSL https://raw.githubusercontent.com/armtch-dev/clavis/main/install.sh | bash
 ```
 
-No pre-built releases yet; build from source.
+Installs to `/usr/local/bin` if writable, otherwise `~/.local/bin`. From a
+checkout, `./install.sh` does the same. Or manually:
+
+```bash
+go build -o clavis . && mv clavis ~/bin  # or wherever is in your PATH
+```
+
+No pre-built releases yet; everything builds from source. The macOS Keychain
+unlock source is Mac-only; on Linux use `CLAVIS_KEY_FILE` or the prompt.
 
 ## First Run
 
