@@ -4,6 +4,7 @@
 package sshx
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"net"
@@ -155,6 +156,36 @@ func Test(p profile.Profile, creds Credentials, timeout time.Duration) TestResul
 		return TestResult{Stage: StageExec, HostKeyFP: observed, HostKeyLine: observedLine, Latency: dialLatency, Err: err, Reason: "authenticated, but running a command failed"}
 	}
 	return TestResult{Stage: StageOK, OK: true, HostKeyFP: observed, HostKeyLine: observedLine, Latency: dialLatency, Reason: fmt.Sprintf("connected and authenticated as %s", p.User)}
+}
+
+// Preflight verifies addr accepts TCP and answers with an SSH banner, without
+// spending an auth attempt. The TUI runs this before handing the terminal to
+// a real session, so a dead or rate-limited host fails fast inside the UI
+// instead of leaving the user staring at a suspended screen while ssh times
+// out. The client banner is sent first (as real clients do) so the server
+// never logs the scanner-signature "did not receive identification string".
+func Preflight(addr string, timeout time.Duration) error {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return errors.New(dialReason(err))
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(timeout))
+	if _, err := fmt.Fprintf(conn, "SSH-2.0-clavis\r\n"); err != nil {
+		return fmt.Errorf("connection dropped during banner exchange: %w", err)
+	}
+	// RFC 4253 §4.2 allows pre-banner lines that don't start with "SSH-".
+	r := bufio.NewReader(conn)
+	for i := 0; i < 20; i++ {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return errors.New("connected, but no SSH banner — service may be rate-limiting or not SSH")
+		}
+		if strings.HasPrefix(line, "SSH-") {
+			return nil
+		}
+	}
+	return errors.New("connected, but the service did not identify as SSH")
 }
 
 func dialReason(err error) string {

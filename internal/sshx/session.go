@@ -3,10 +3,13 @@ package sshx
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,15 +29,19 @@ import (
 // generated known_hosts file + StrictHostKeyChecking=yes, so the TOFU pin
 // protects real sessions, not just tests. Unpinned profiles fall back to
 // OpenSSH's own known_hosts prompting.
-func ExternalCommand(p profile.Profile, keyPEM []byte) (cmd *exec.Cmd, cleanup func(), err error) {
+// The returned StderrTail holds the last of ssh's diagnostic output; when the
+// session ends badly the TUI's redraw wipes whatever ssh printed, so the tail
+// is the only place the real reason ("Permission denied", "Connection timed
+// out"…) survives to be shown in the status bar.
+func ExternalCommand(p profile.Profile, keyPEM []byte) (cmd *exec.Cmd, tail *StderrTail, cleanup func(), err error) {
 	dir, err := os.MkdirTemp("", "clavis-*")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	keyPath := filepath.Join(dir, "id")
 	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
 		os.RemoveAll(dir)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	sig := make(chan os.Signal, 1)
@@ -56,13 +63,17 @@ func ExternalCommand(p profile.Profile, keyPEM []byte) (cmd *exec.Cmd, cleanup f
 	args := []string{
 		"-i", keyPath,
 		"-o", "IdentitiesOnly=yes",
+		// The TUI preflights reachability before handing over the terminal;
+		// a stall past that point should fail fast, not hang the user on a
+		// blank screen for the OS's multi-minute TCP timeout.
+		"-o", "ConnectTimeout=10",
 		"-p", fmt.Sprintf("%d", p.Port),
 	}
 	if p.HostKey != "" {
 		khPath := filepath.Join(dir, "known_hosts")
 		if err := os.WriteFile(khPath, []byte(knownHostsLine(p)+"\n"), 0o600); err != nil {
 			cleanup()
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		args = append(args,
 			"-o", "UserKnownHostsFile="+khPath,
@@ -74,8 +85,43 @@ func ExternalCommand(p profile.Profile, keyPEM []byte) (cmd *exec.Cmd, cleanup f
 	args = append(args, fmt.Sprintf("%s@%s", p.User, p.Host))
 
 	cmd = exec.Command("ssh", args...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd, cleanup, nil
+	tail = &StderrTail{}
+	cmd.Stdin, cmd.Stdout = os.Stdin, os.Stdout
+	cmd.Stderr = io.MultiWriter(os.Stderr, tail)
+	return cmd, tail, cleanup, nil
+}
+
+// StderrTail is an io.Writer that retains the last ~2KB written to it.
+// Safe for concurrent use (the exec pipe writes from another goroutine).
+type StderrTail struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+const stderrTailCap = 2048
+
+func (t *StderrTail) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > stderrTailCap {
+		t.buf = t.buf[len(t.buf)-stderrTailCap:]
+	}
+	t.mu.Unlock()
+	return len(p), nil
+}
+
+// LastLine returns the final non-empty line seen, stripped of the "ssh: "
+// prefix — a one-line reason suitable for a status bar.
+func (t *StderrTail) LastLine() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	lines := strings.Split(string(t.buf), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if s := strings.TrimSpace(lines[i]); s != "" {
+			return strings.TrimPrefix(s, "ssh: ")
+		}
+	}
+	return ""
 }
 
 // knownHostsLine formats the pinned key the way sshd's known_hosts expects:

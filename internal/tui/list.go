@@ -182,8 +182,8 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.importSSHConfig()
 		return m, m.saveAll("import from ssh_config")
 	case "enter":
-		if p := m.selected(vis); p != nil {
-			return m, m.connectCmd(*p)
+		if p := m.selected(vis); p != nil && m.connecting == "" {
+			return m, m.startConnect(*p)
 		}
 	}
 	return m, nil
@@ -708,6 +708,9 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 	}
 	if m.testing[p.ID] {
 		trailing = m.spin.View() + theme.Accent.Render(" testing")
+	}
+	if m.connecting == p.ID {
+		trailing = m.spin.View() + theme.Accent.Render(" connecting")
 	}
 	if trailing != "" {
 		cells = append(cells, trailing)

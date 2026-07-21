@@ -34,9 +34,12 @@ const (
 )
 
 const (
-	probeInterval = 10 * time.Second
-	probeTimeout  = 3 * time.Second
-	testTimeout   = 8 * time.Second
+	// 15s keeps the dashboard fresh while staying well under the per-source
+	// connection-rate limits some gateways enforce on SSH (see probe.backoff).
+	probeInterval    = 15 * time.Second
+	probeTimeout     = 3 * time.Second
+	testTimeout      = 8 * time.Second
+	preflightTimeout = 5 * time.Second
 
 	statusTTL    = 5 * time.Second  // info/ok/warn messages fade after this
 	statusErrTTL = 10 * time.Second // errors linger a little longer
@@ -70,6 +73,12 @@ type Model struct {
 	filtering bool
 	sortMode  sortMode        // cycled with "o"
 	testing   map[string]bool // profile IDs with an in-flight test
+
+	// connect preflight: the profile being reachability-checked before the
+	// terminal is handed to ssh, so a dead host fails inside the TUI instead
+	// of dumping the user onto a suspended screen.
+	connecting string // profile ID, "" when idle
+	pending    *pendingConnect
 
 	// probe plumbing
 	monitor  *probe.Monitor
@@ -151,7 +160,7 @@ func (m *Model) setStatus(k statusKind, msg string) {
 
 // spinnerActive reports whether any in-flight work warrants animation.
 func (m *Model) spinnerActive() bool {
-	return m.syncing || len(m.testing) > 0 || (m.wizard != nil && m.wizard.awaitingTest)
+	return m.syncing || len(m.testing) > 0 || m.connecting != "" || (m.wizard != nil && m.wizard.awaitingTest)
 }
 
 // --- messages ---
@@ -174,6 +183,19 @@ type sessionDoneMsg struct {
 	hostKeyFP   string
 	hostKeyLine string
 	err         error
+	detail      string // last stderr line from ssh, if any — the human reason
+}
+
+// pendingConnect stashes the profile and decrypted credentials between the
+// preflight starting and the terminal handover, so they aren't re-derived.
+type pendingConnect struct {
+	p     profile.Profile
+	creds sshx.Credentials
+}
+
+type preflightMsg struct {
+	profileID string
+	err       error
 }
 
 func waitForProbe(ch chan probe.Status) tea.Cmd {
@@ -260,10 +282,18 @@ func (m *Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case preflightMsg:
+		return m.applyPreflight(msg)
+
 	case sessionDoneMsg:
+		m.monitor.Suspend(msg.profileID, false)
 		m.pinHostKey(msg.profileID, msg.hostKeyFP, msg.hostKeyLine)
 		if msg.err != nil {
-			m.setStatus(statusErr, "session ended: "+truncErr(msg.err))
+			reason := truncErr(msg.err)
+			if msg.detail != "" {
+				reason = msg.detail
+			}
+			m.setStatus(statusErr, "session ended: "+reason)
 		} else {
 			m.setStatus(statusInfo, "session closed")
 		}
@@ -376,28 +406,70 @@ func (m *Model) credsFor(p *profile.Profile) (sshx.Credentials, error) {
 	return creds, nil
 }
 
-// connectCmd hands the terminal over to a real SSH session.
-func (m *Model) connectCmd(p profile.Profile) tea.Cmd {
+// startConnect kicks off a connect: credentials are resolved and the host is
+// preflighted asynchronously while the TUI keeps running (spinner in the
+// status bar). Only when the host actually answers does the terminal get
+// handed to ssh — so a dead, slow, or rate-limited host is a status-bar
+// message, not a long suspension of the UI. Probing is paused for the host
+// for the duration so the probe and the session don't burst connections
+// together (some gateways rate-limit new SSH connections per source).
+func (m *Model) startConnect(p profile.Profile) tea.Cmd {
 	creds, err := m.credsFor(&p)
 	if err != nil {
 		m.setStatus(statusErr, err.Error())
 		return nil
 	}
+	m.connecting = p.ID
+	m.pending = &pendingConnect{p: p, creds: creds}
+	m.monitor.Suspend(p.ID, true)
+	m.setStatus(statusInfo, "connecting to "+p.Name+"…")
+	addr := p.Addr()
+	return func() tea.Msg {
+		return preflightMsg{p.ID, sshx.Preflight(addr, preflightTimeout)}
+	}
+}
+
+// applyPreflight either surfaces the failure (staying in the TUI) or hands
+// the terminal over to the real session.
+func (m *Model) applyPreflight(msg preflightMsg) (tea.Model, tea.Cmd) {
+	if m.pending == nil || m.connecting != msg.profileID {
+		return m, nil // stale — profile deleted or connect superseded
+	}
+	pc := *m.pending
+	m.connecting, m.pending = "", nil
+	if msg.err != nil {
+		m.monitor.Suspend(pc.p.ID, false)
+		m.setStatus(statusErr, pc.p.Name+": "+msg.err.Error())
+		return m, nil
+	}
+	m.statusMsg = "" // clear "connecting…" before the handover
+	return m, m.handoverCmd(pc)
+}
+
+// handoverCmd gives the terminal to a real SSH session; probing for the host
+// stays suspended until sessionDoneMsg.
+func (m *Model) handoverCmd(pc pendingConnect) tea.Cmd {
+	p := pc.p
 	if p.HasAuth(profile.AuthKey) {
-		cmd, cleanup, err := sshx.ExternalCommand(p, creds.PrivateKey)
+		cmd, tail, cleanup, err := sshx.ExternalCommand(p, pc.creds.PrivateKey)
 		if err != nil {
+			m.monitor.Suspend(p.ID, false)
 			m.setStatus(statusErr, err.Error())
 			return nil
 		}
 		return tea.ExecProcess(cmd, func(err error) tea.Msg {
 			cleanup()
-			return sessionDoneMsg{p.ID, "", "", err}
+			detail := ""
+			if err != nil {
+				detail = tail.LastLine()
+			}
+			return sessionDoneMsg{p.ID, "", "", err, detail}
 		})
 	}
 	// password-only: in-process PTY session
-	sess := &passwordSession{p: p, password: creds.Password}
+	sess := &passwordSession{p: p, password: pc.creds.Password}
 	return tea.Exec(sess, func(err error) tea.Msg {
-		return sessionDoneMsg{p.ID, sess.fp, sess.keyLine, err}
+		return sessionDoneMsg{p.ID, sess.fp, sess.keyLine, err, ""}
 	})
 }
 
