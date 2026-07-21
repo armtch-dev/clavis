@@ -155,6 +155,28 @@ func TestViewListResponsive(t *testing.T) {
 	m.sortMode = sortDefault
 	m.cursor = 0
 
+	// No display line may exceed the terminal width: overflow wraps in the
+	// terminal and tears the selection highlight across two lines. Long
+	// tags at tag-showing widths (>=96) are the regression case.
+	if _, err := m.store.Add(profile.Profile{
+		Name: "hetzner reverse proxy", Host: "5.78.159.33", Port: 22, User: "root",
+		Auth: []profile.AuthKind{profile.AuthKey}, Tags: []string{"cloud", "hetzner", "proxy"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range [][2]int{{96, 24}, {100, 24}, {110, 24}, {129, 24}} {
+		m.width, m.height = s[0], s[1]
+		for c := range m.visible() {
+			m.cursor = c
+			for _, line := range strings.Split(m.View(), "\n") {
+				if w := lipgloss.Width(line); w > s[0] {
+					t.Errorf("%dx%d cursor=%d: line is %d cells wide: %q", s[0], s[1], c, w, line)
+				}
+			}
+		}
+	}
+	m.cursor = 0
+
 	// Overlay screens should render without panicking at any size.
 	for _, s := range sizes {
 		m.width, m.height = s[0], s[1]

@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/armtch-dev/clavis/internal/profile"
 	"github.com/armtch-dev/clavis/internal/sshconfig"
@@ -718,9 +719,13 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 
 	line := strings.Join(cells, l.gap)
 	lead := strings.Repeat(" ", max(l.pad-1, 0))
+	rowW := max(l.listW-l.pad, 20)
+	// Clip to the row budget: lipgloss.Width wraps overflow onto a second
+	// line, which tears the selection highlight on narrow terminals.
+	line = ansi.Truncate(line, rowW-1, "…")
 	if selected {
 		body := lipgloss.NewStyle().Background(theme.SelBg).Foreground(theme.White).
-			Width(max(l.listW-l.pad, 20)).Render(" " + line)
+			Width(rowW).Render(" " + line)
 		return lead + theme.SelTick.Render(theme.IconPointer) + body
 	}
 	return lead + "  " + line
