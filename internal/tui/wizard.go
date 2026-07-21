@@ -105,8 +105,8 @@ func (w *wizardModel) setStep(s wstep) {
 		ta := textarea.New()
 		ta.Placeholder = "-----BEGIN OPENSSH PRIVATE KEY-----\n…paste the whole key here…\n-----END OPENSSH PRIVATE KEY-----"
 		ta.ShowLineNumbers = false
-		ta.SetWidth(64)
-		ta.SetHeight(9)
+		ta.SetWidth(clamp(w.app.width-16, 28, 64))
+		ta.SetHeight(clamp(w.app.height-14, 5, 9))
 		ta.CharLimit = 0
 		if len(w.keyPEM) > 0 {
 			ta.SetValue(string(w.keyPEM))
@@ -541,7 +541,7 @@ func (w *wizardModel) view(width, height int) string {
 	b.WriteString("\n\n" + theme.Divider(dw))
 	b.WriteString("\n" + w.footer())
 
-	return theme.Panel.Width(inner).Render(b.String())
+	return center(theme.Panel.Width(inner).Render(b.String()), width, height)
 }
 
 // progress renders the applicable steps as matte dots.
@@ -558,7 +558,15 @@ func (w *wizardModel) progress(width int) string {
 			parts = append(parts, theme.Hint.Render("·"))
 		}
 	}
-	return strings.Join(parts, " ")
+	cur := 1
+	for i, s := range seq {
+		if s == w.step {
+			cur = i + 1
+			break
+		}
+	}
+	counter := theme.Hint.Render(fmt.Sprintf("step %d of %d", cur, len(seq)))
+	return strings.Join(parts, " ") + "  " + counter
 }
 
 func (w *wizardModel) footer() string {
@@ -576,7 +584,7 @@ func (w *wizardModel) footer() string {
 
 func (w *wizardModel) viewTest() string {
 	if w.awaitingTest {
-		return theme.Accent.Render("connecting to " + w.draft.Addr() + " …")
+		return w.app.spin.View() + " " + theme.Accent.Render("connecting to "+w.draft.Addr()+" …")
 	}
 	if w.testResult == nil {
 		return ""

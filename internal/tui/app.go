@@ -6,8 +6,10 @@ package tui
 import (
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -35,6 +37,9 @@ const (
 	probeInterval = 10 * time.Second
 	probeTimeout  = 3 * time.Second
 	testTimeout   = 8 * time.Second
+
+	statusTTL    = 5 * time.Second  // info/ok/warn messages fade after this
+	statusErrTTL = 10 * time.Second // errors linger a little longer
 )
 
 type statusKind int
@@ -63,6 +68,7 @@ type Model struct {
 	cursor    int
 	filter    string
 	filtering bool
+	sortMode  sortMode        // cycled with "o"
 	testing   map[string]bool // profile IDs with an in-flight test
 
 	// probe plumbing
@@ -77,9 +83,14 @@ type Model struct {
 	confirm  confirmModel
 	settings *settingsModel
 
-	statusMsg  string
-	statusType statusKind
-	syncing    bool
+	statusMsg   string
+	statusType  statusKind
+	statusSeq   int // generation counter, bumped by setStatus
+	statusSched int // generation an expiry tick has been scheduled for
+	syncing     bool
+
+	spin     spinner.Model
+	spinning bool // a spinner tick is in flight
 }
 
 // New builds the root model. identity is non-empty only right after a
@@ -93,6 +104,7 @@ func New(cfgDir string, cfg *config.Config, store *profile.Store, v *vault.Vault
 		testing:  map[string]bool{},
 		statuses: map[string]probe.Status{},
 		probeCh:  make(chan probe.Status, 64),
+		spin:     spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(theme.Accent)),
 	}
 	m.monitor = probe.New(probeInterval, probeTimeout, func(s probe.Status) {
 		select {
@@ -130,8 +142,16 @@ func (m *Model) syncTargets() {
 	m.monitor.SetTargets(targets)
 }
 
+// setStatus records a status message and bumps its generation; the expiry
+// tick is scheduled centrally in Update, so call sites stay command-free.
 func (m *Model) setStatus(k statusKind, msg string) {
 	m.statusType, m.statusMsg = k, msg
+	m.statusSeq++
+}
+
+// spinnerActive reports whether any in-flight work warrants animation.
+func (m *Model) spinnerActive() bool {
+	return m.syncing || len(m.testing) > 0 || (m.wizard != nil && m.wizard.awaitingTest)
 }
 
 // --- messages ---
@@ -144,6 +164,10 @@ type testDoneMsg struct {
 }
 
 type syncDoneMsg struct{ err error }
+
+// statusExpireMsg fades a status message; seq guards against clearing a
+// message newer than the one the tick was scheduled for.
+type statusExpireMsg struct{ seq int }
 
 type sessionDoneMsg struct {
 	profileID   string
@@ -163,6 +187,52 @@ func (m *Model) Init() tea.Cmd {
 // --- update ---
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case statusExpireMsg:
+		if msg.seq == m.statusSeq && !m.syncing {
+			m.statusMsg = ""
+		}
+		return m, nil
+	case spinner.TickMsg:
+		if !m.spinnerActive() {
+			m.spinning = false // stop the loop; restarted centrally below
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spin, cmd = m.spin.Update(msg)
+		return m, cmd
+	}
+	model, cmd := m.dispatch(msg)
+	return model, m.housekeeping(cmd)
+}
+
+// housekeeping appends the centrally driven commands — status expiry and
+// spinner ticks — to whatever a dispatch produced, so the ~20 setStatus call
+// sites and every syncing/testing toggle stay command-free.
+func (m *Model) housekeeping(cmd tea.Cmd) tea.Cmd {
+	cmds := []tea.Cmd{cmd}
+	if m.statusMsg != "" && m.statusSched != m.statusSeq {
+		m.statusSched = m.statusSeq // exactly one tick per message
+		seq := m.statusSeq
+		ttl := statusTTL
+		if m.statusType == statusErr {
+			ttl = statusErrTTL
+		}
+		cmds = append(cmds, tea.Tick(ttl, func(time.Time) tea.Msg { return statusExpireMsg{seq} }))
+	}
+	if m.spinnerActive() && !m.spinning {
+		m.spinning = true
+		cmds = append(cmds, m.spin.Tick)
+	}
+	if len(cmds) == 1 {
+		return cmd
+	}
+	return tea.Batch(cmds...)
+}
+
+// dispatch is the pre-housekeeping message handling: global messages first,
+// then whatever screen is active.
+func (m *Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -421,56 +491,92 @@ func (m *Model) View() string {
 	if m.quiting {
 		return ""
 	}
+	bodyH := max(m.height-m.footerHeight(), 1)
 	var body string
 	switch m.screen {
 	case scrUnlock:
-		body = m.unlock.view(m.width, m.height)
+		body = m.unlock.view(m.width, bodyH)
 	case scrFirstRun:
-		body = m.firstRun.view(m.width, m.height)
+		body = m.firstRun.view(m.width, bodyH)
 	case scrWizard:
-		body = m.wizard.view(m.width, m.height)
+		body = m.wizard.view(m.width, bodyH)
 	case scrConfirmDelete:
-		body = m.confirm.view(m.width, m.height)
+		body = m.confirm.view(m.width, bodyH)
 	case scrSettings:
-		body = m.settings.view(m.width, m.height)
+		body = m.settings.view(m.width, bodyH)
 	default:
 		body = m.viewList()
 	}
 	if m.help {
-		body = m.viewHelp()
+		body = center(m.viewHelp(), m.width, bodyH)
+	}
+	// Pin the footer to the bottom of the terminal.
+	body = strings.TrimRight(body, "\n")
+	if h := lipgloss.Height(body); m.height > 0 && h < bodyH {
+		body += strings.Repeat("\n", bodyH-h)
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, body, m.viewStatusBar())
 }
 
+// footerHeight mirrors viewStatusBar's line count so views can size themselves.
+func (m *Model) footerHeight() int {
+	h := 1 // divider
+	if m.statusMsg != "" || m.syncing {
+		h++
+	}
+	if m.screen == scrList && !m.help {
+		h++ // key legend
+	}
+	return h
+}
+
 func (m *Model) viewStatusBar() string {
 	width := max(m.width, 40)
-	div := theme.Divider(width)
+	pad := strings.Repeat(" ", m.layoutList().pad)
+	lines := []string{theme.Divider(width)}
 
-	// Default (no message): a compact, matte keycap hint line.
-	if m.statusMsg == "" && !m.syncing {
-		hint := hintKeys([][2]string{
-			{"enter", "connect"}, {"a", "add"}, {"t", "test"}, {"e", "edit"},
-			{"d", "delete"}, {"s", "sync"}, {"g", "settings"}, {"i", "import"},
-			{"/", "filter"}, {"?", "help"}, {"q", "quit"},
-		})
-		return div + "\n " + hint
+	if m.statusMsg != "" || m.syncing {
+		style := theme.Dim
+		switch m.statusType {
+		case statusOK:
+			style = theme.StatusOK
+		case statusWarn:
+			style = theme.StatusWarn
+		case statusErr:
+			style = theme.StatusErr
+		}
+		msg := m.statusMsg
+		if m.syncing {
+			msg = m.spin.View() + " syncing… " + msg
+			style = theme.Accent
+		}
+		lines = append(lines, pad+style.MaxWidth(width-len(pad)-1).Render(msg))
 	}
 
-	style := theme.Dim
-	switch m.statusType {
-	case statusOK:
-		style = theme.StatusOK
-	case statusWarn:
-		style = theme.StatusWarn
-	case statusErr:
-		style = theme.StatusErr
+	if m.screen == scrList && !m.help {
+		lines = append(lines, pad+m.legend(width-2*len(pad)))
 	}
-	msg := m.statusMsg
-	if m.syncing {
-		msg = "syncing… " + msg
-		style = theme.Accent
+	return strings.Join(lines, "\n")
+}
+
+// legend renders the persistent key legend, dropping entries until it fits.
+func (m *Model) legend(avail int) string {
+	if m.filtering {
+		return hintKeys([][2]string{{"enter", "apply"}, {"esc", "clear"}})
 	}
-	return div + "\n " + style.MaxWidth(width-1).Render(msg)
+	tiers := [][][2]string{
+		{{"enter", "connect"}, {"a", "add"}, {"e", "edit"}, {"d", "delete"}, {"t", "test"},
+			{"s", "sync"}, {"g", "settings"}, {"i", "import"}, {"o", "sort"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
+		{{"enter", "connect"}, {"a", "add"}, {"e", "edit"}, {"d", "delete"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
+		{{"enter", "connect"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
+		{{"?", "help"}, {"q", "quit"}},
+	}
+	for _, t := range tiers {
+		if s := hintKeys(t); lipgloss.Width(s) <= avail {
+			return s
+		}
+	}
+	return hintKeys(tiers[len(tiers)-1])
 }
 
 func max(a, b int) int {

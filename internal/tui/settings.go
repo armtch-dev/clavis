@@ -366,7 +366,7 @@ func (s *settingsModel) view(w, h int) string {
 		b.WriteString("\n" + theme.Accent.Render("talking to GitHub…") + "\n")
 	}
 	b.WriteString("\n" + theme.Divider(dw) + "\n" + theme.Hint.Render("esc back"))
-	return theme.Panel.Width(inner).Render(b.String())
+	return center(theme.Panel.Width(inner).Render(b.String()), w, h)
 }
 
 func onOff(v bool) string {
