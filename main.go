@@ -13,6 +13,7 @@ import (
 	"github.com/armtch-dev/clavis/internal/cli"
 	"github.com/armtch-dev/clavis/internal/config"
 	"github.com/armtch-dev/clavis/internal/profile"
+	"github.com/armtch-dev/clavis/internal/theme"
 	"github.com/armtch-dev/clavis/internal/tui"
 	"github.com/armtch-dev/clavis/internal/vault"
 )
@@ -86,6 +87,9 @@ func run() error {
 		return err
 	}
 	defer m.Close()
+	// Rebase the palette's bg-relative tints onto the terminal's real
+	// background before bubbletea takes over the tty (OSC 11 query).
+	theme.Init()
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err

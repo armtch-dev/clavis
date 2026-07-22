@@ -8,9 +8,11 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/armtch-dev/clavis/internal/probe"
 	"github.com/armtch-dev/clavis/internal/profile"
+	"github.com/armtch-dev/clavis/internal/theme"
 )
 
 // Status messages fade: a matching statusExpireMsg clears the message, a
@@ -84,6 +86,42 @@ func TestSpinnerActive(t *testing.T) {
 	}
 	if m.spinning {
 		t.Error("spinning flag still set after work finished")
+	}
+}
+
+// The selected row's background fill must survive the SGR resets that end
+// every foreground-styled cell: after each inner reset the background
+// sequence has to be re-opened, or the highlight tears and only the unstyled
+// tail of the row gets filled (the original bug, visible on any colour
+// terminal). Tests run colourless by default, so force a profile.
+func TestSelectionFillNotTorn(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(old)
+
+	const reset = "\x1b[0m"
+	marker := lipgloss.NewStyle().Background(theme.SelBg).Render("|")
+	seq := marker[:strings.Index(marker, "|")]
+	if seq == "" {
+		t.Fatal("no background sequence produced under TrueColor profile")
+	}
+
+	in := " " + theme.StatusOK.Render("●") + " name " + theme.Sub.Render("root@host") + " tail"
+	out := selFill(in, 40)
+
+	if lipgloss.Width(out) != 40 {
+		t.Errorf("selFill width = %d, want 40", lipgloss.Width(out))
+	}
+	if !strings.HasPrefix(out, seq) {
+		t.Error("selFill output does not open with the background sequence")
+	}
+	if !strings.HasSuffix(out, reset) {
+		t.Error("selFill output does not end with a reset")
+	}
+	// Every reset except the final one must immediately re-open the bg.
+	body := strings.TrimSuffix(out, reset)
+	if n, m := strings.Count(body, reset), strings.Count(body, reset+seq); n != m {
+		t.Errorf("%d of %d inner resets re-open the selection background", m, n)
 	}
 }
 
@@ -164,17 +202,26 @@ func TestViewListResponsive(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range [][2]int{{96, 24}, {100, 24}, {110, 24}, {129, 24}} {
-		m.width, m.height = s[0], s[1]
-		for c := range m.visible() {
-			m.cursor = c
-			for _, line := range strings.Split(m.View(), "\n") {
-				if w := lipgloss.Width(line); w > s[0] {
-					t.Errorf("%dx%d cursor=%d: line is %d cells wide: %q", s[0], s[1], c, w, line)
+	// Crowd the header meta too: an active sort indicator, a down host, and a
+	// sync remote all compete with the title for one line — at 70-90 cols the
+	// meta must drop entries rather than overflow and wrap the frame.
+	m.cfg.Sync.Remote = "https://github.com/yshah/clavis-sync.git"
+	for _, mode := range []sortMode{sortDefault, sortLatency, sortTags} {
+		m.sortMode = mode
+		for _, s := range [][2]int{{70, 24}, {80, 24}, {90, 24}, {96, 24}, {100, 24}, {110, 24}, {129, 24}} {
+			m.width, m.height = s[0], s[1]
+			for c := range m.visible() {
+				m.cursor = c
+				for _, line := range strings.Split(m.View(), "\n") {
+					if w := lipgloss.Width(line); w > s[0] {
+						t.Errorf("sort=%v %dx%d cursor=%d: line is %d cells wide: %q", mode, s[0], s[1], c, w, line)
+					}
 				}
 			}
 		}
 	}
+	m.cfg.Sync.Remote = ""
+	m.sortMode = sortDefault
 	m.cursor = 0
 
 	// Overlay screens should render without panicking at any size.

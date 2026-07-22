@@ -323,7 +323,9 @@ func (m *Model) layoutList() listLayout {
 	l.showColHead = m.height >= 16 && w >= 70
 	if w >= 130 {
 		l.showDetail = true
-		l.detailW = clamp(w/4, 36, 40)
+		// Grows to 56 on ultrawides so the host-key fingerprint and ping
+		// spread fit on one line instead of leaving a dead zone.
+		l.detailW = clamp(w/4, 36, 56)
 		l.listW = w - l.detailW - 1 // -1 for the pane's left hairline
 	}
 	l.nameW = clamp(l.listW/5, 14, 28)
@@ -348,6 +350,7 @@ func clamp(v, lo, hi int) int {
 func (m *Model) viewList() string {
 	l := m.layoutList()
 	pad := strings.Repeat(" ", l.pad)
+	vis := m.visible()
 	var b strings.Builder
 
 	// Header: title on the left, quiet meta on the right.
@@ -357,14 +360,22 @@ func (m *Model) viewList() string {
 		if m.filtering {
 			cursor = theme.Accent.Render("▌")
 		}
-		left += theme.Dim.Render("  filter ") + theme.Value.Render(m.filter) + cursor
+		left += theme.Dim.Render("  filter ") + theme.Value.Render(m.filter) + cursor +
+			theme.Dim.Render(fmt.Sprintf("  %d/%d", len(vis), len(m.store.Profiles)))
 	}
 	var meta []string
+	if m.sortMode != sortDefault {
+		meta = append(meta, theme.Dim.Render("sort ")+theme.Sub.Render(m.sortMode.String()))
+	}
 	if n := len(m.store.Profiles); n > 0 {
-		up := 0
+		up, down := 0, 0
 		for _, p := range m.store.Profiles {
-			if st, ok := m.statuses[p.ID]; ok && st.Reachable {
-				up++
+			if st, ok := m.statuses[p.ID]; ok {
+				if st.Reachable {
+					up++
+				} else {
+					down++
+				}
 			}
 		}
 		count := fmt.Sprintf("%d host", n)
@@ -375,6 +386,11 @@ func (m *Model) viewList() string {
 			count = fmt.Sprintf("%s · %d up", count, up)
 		}
 		meta = append(meta, theme.Dim.Render(count))
+		// A down host can scroll out of view on a long list — keep the fact
+		// that something is down glanceable at the top level.
+		if down > 0 {
+			meta = append(meta, theme.StatusErr.Render(fmt.Sprintf("%d down", down)))
+		}
 	}
 	if !m.vault.Unlocked() {
 		meta = append(meta, theme.StatusWarn.Render(theme.IconLock+" locked"))
@@ -382,7 +398,17 @@ func (m *Model) viewList() string {
 	if m.cfg.Sync.Remote != "" {
 		meta = append(meta, theme.Dim.Render(theme.IconSync+" ")+theme.Value.Render(shortRemote(m.cfg.Sync.Remote)))
 	}
-	b.WriteString(spread(left, strings.Join(meta, theme.Dim.Render("  ·  "))+pad, l.width) + "\n")
+	// The meta side must never push the header past the terminal width: an
+	// overflowing line wraps, shifting the whole frame down a row. Drop
+	// entries front-first (sort indicator, then counts — the warnings at the
+	// tail matter most), then clip as a last resort.
+	sep := theme.Dim.Render("  ·  ")
+	for len(meta) > 0 &&
+		lipgloss.Width(left)+lipgloss.Width(strings.Join(meta, sep)+pad)+1 > l.width {
+		meta = meta[1:]
+	}
+	header := spread(left, strings.Join(meta, sep)+pad, l.width)
+	b.WriteString(ansi.Truncate(header, l.width, "") + "\n")
 	b.WriteString(theme.Divider(l.width) + "\n")
 	headerH := 2
 	if l.roomy {
@@ -390,7 +416,6 @@ func (m *Model) viewList() string {
 		headerH++
 	}
 
-	vis := m.visible()
 	avail := m.height - headerH - m.footerHeight()
 	if len(vis) == 0 {
 		empty := "No profiles yet.  Press " + theme.Key("a") + theme.Dim.Render(" to add one, or ") +
@@ -524,7 +549,7 @@ func (m *Model) renderDetail(p *profile.Profile, l listLayout, avail int) string
 		auth = append(auth, theme.IconKey+" key")
 	}
 	if p.HasAuth(profile.AuthPassword) {
-		auth = append(auth, theme.IconPwd+" password")
+		auth = append(auth, "password")
 	}
 	if len(auth) == 0 {
 		auth = append(auth, "none")
@@ -552,11 +577,14 @@ func (m *Model) renderDetail(p *profile.Profile, l listLayout, avail int) string
 	}
 	b.WriteString(label("state") + state + "\n")
 
-	seen := theme.Hint.Render("never")
-	if have && !st.LastSeen.IsZero() {
-		seen = theme.Value.Render(st.LastSeen.Format("Jan 2 15:04"))
+	// "seen" only matters for a down host — for an up host it is just "now".
+	if have && !st.Reachable {
+		seen := theme.Hint.Render("never")
+		if !st.LastSeen.IsZero() {
+			seen = theme.Value.Render(st.LastSeen.Format("Jan 2 15:04"))
+		}
+		b.WriteString(label("seen") + seen + "\n")
 	}
-	b.WriteString(label("seen") + seen + "\n")
 
 	// Latency spread over the probe history, ignoring failed (-1) samples.
 	var lo, hi, sum float64
@@ -578,18 +606,19 @@ func (m *Model) renderDetail(p *profile.Profile, l listLayout, avail int) string
 	}
 	ping := theme.Hint.Render("–")
 	if n > 0 {
-		ping = theme.Value.Render(fmt.Sprintf("%.0f / %.0f / %.0f ms", lo, sum/float64(n), hi))
+		vals := fmt.Sprintf("%.0f / %.0f / %.0f ms", lo, sum/float64(n), hi)
+		ping = theme.Value.Render(vals)
+		// Three bare numbers force the reader to guess the convention.
+		if legend := "  min·avg·max"; len(vals)+len(legend)+6 <= cw {
+			ping += theme.Hint.Render(legend)
+		}
 	}
 	b.WriteString(label("ping") + ping + "\n")
 
+	// Middle-ellipsized to one line: people verify fingerprints by comparing
+	// the start and the end, never the middle.
 	if p.HostKeyFP != "" {
-		b.WriteString(label("key"))
-		for i, ln := range wrapTo(p.HostKeyFP, cw-6) {
-			if i > 0 {
-				b.WriteString(strings.Repeat(" ", 6))
-			}
-			b.WriteString(theme.Dim.Render(ln) + "\n")
-		}
+		b.WriteString(label("key") + theme.Dim.Render(midTrunc(p.HostKeyFP, cw-6)) + "\n")
 	}
 	return pane.Render(strings.TrimRight(b.String(), "\n"))
 }
@@ -606,18 +635,19 @@ func truncTo(s string, w int) string {
 	return string(r[:w-1]) + "…"
 }
 
-// wrapTo hard-wraps s into chunks of at most w runes.
-func wrapTo(s string, w int) []string {
-	if w < 4 {
-		w = 4
-	}
+// midTrunc shortens s to at most w runes by eliding the middle, keeping a
+// longer head than tail (fingerprint prefixes carry the algorithm name).
+func midTrunc(s string, w int) string {
 	r := []rune(s)
-	var out []string
-	for len(r) > w {
-		out = append(out, string(r[:w]))
-		r = r[w:]
+	if len(r) <= w {
+		return s
 	}
-	return append(out, string(r))
+	if w < 8 {
+		return truncTo(s, w)
+	}
+	head := (w - 1) * 3 / 5
+	tail := w - 1 - head
+	return string(r[:head]) + "…" + string(r[len(r)-tail:])
 }
 
 // relDur formats a duration since last contact, compact: 42s, 7m, 3h, 2d.
@@ -638,8 +668,10 @@ func relDur(d time.Duration) string {
 }
 
 // colHeader labels the columns; alignment mirrors renderRow exactly.
+// Muted, not Hint: headers are navigation, not decoration — Faint is kept
+// for hairlines only.
 func (m *Model) colHeader(l listLayout) string {
-	h := theme.Hint
+	h := theme.Dim
 	cells := []string{
 		" ",
 		h.Width(6).Align(lipgloss.Right).Render("ping"),
@@ -659,11 +691,14 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 	st, have := m.statuses[p.ID]
 
 	dotColor, dot, latency := theme.Muted, theme.IconIdle, "     ·"
+	latCell := ""
 	if have {
 		if st.Reachable {
 			dotColor = theme.LatencyColor(st.LatencyMs)
 			dot = theme.IconUp
-			latency = fmt.Sprintf("%4.0fms", st.LatencyMs)
+			// Digits carry the data, the repeated unit is noise: dim the "ms".
+			latCell = lipgloss.NewStyle().Foreground(dotColor).Render(fmt.Sprintf("%4.0f", st.LatencyMs)) +
+				theme.Dim.Render("ms")
 		} else {
 			dotColor, dot, latency = theme.Red, theme.IconDown, "  down"
 			if !st.LastSeen.IsZero() {
@@ -671,9 +706,12 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 			}
 		}
 	}
+	if latCell == "" {
+		latCell = lipgloss.NewStyle().Foreground(dotColor).Width(6).Align(lipgloss.Right).Render(latency)
+	}
 	cells := []string{
 		lipgloss.NewStyle().Foreground(dotColor).Render(dot),
-		lipgloss.NewStyle().Foreground(dotColor).Width(6).Align(lipgloss.Right).Render(latency),
+		latCell,
 	}
 	if l.showSpark {
 		cells = append(cells, lipgloss.NewStyle().Width(l.sparkW).Render(sparkline(st.History, l.sparkW)))
@@ -692,7 +730,8 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 	if len(target) > l.endW {
 		target = target[:l.endW-1] + "…"
 	}
-	cells = append(cells, theme.Dim.Width(l.endW).Render(target))
+	// Subtle, not Muted: the target is real data, a step above chrome.
+	cells = append(cells, theme.Sub.Width(l.endW).Render(target))
 
 	var auth []string
 	if p.HasAuth(profile.AuthKey) {
@@ -724,11 +763,31 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 	// line, which tears the selection highlight on narrow terminals.
 	line = ansi.Truncate(line, rowW-1, "…")
 	if selected {
-		body := lipgloss.NewStyle().Background(theme.SelBg).Foreground(theme.White).
-			Width(rowW).Render(" " + line)
-		return lead + theme.SelTick.Render(theme.IconPointer) + body
+		return lead + theme.SelTick.Render(theme.IconPointer) + selFill(" "+line, rowW)
 	}
 	return lead + "  " + line
+}
+
+// selFill paints the selection background under a line whose cells are
+// already foreground-styled. Wrapping the joined line in a Background style
+// doesn't work: every cell's SGR reset kills the background mid-row, so only
+// the unstyled tail gets filled (the highlight visibly "tears"). Instead the
+// background sequence is re-opened after each reset, keeping the per-cell
+// colours (green dot, blue tags) on top of the fill.
+func selFill(line string, width int) string {
+	if pad := width - lipgloss.Width(line); pad > 0 {
+		line += strings.Repeat(" ", pad)
+	}
+	// Derive the bg sequence for the active colour profile from a probe
+	// render, rather than hardcoding a truecolour escape.
+	marker := lipgloss.NewStyle().Background(theme.SelBg).Render("|")
+	i := strings.Index(marker, "|")
+	if i <= 0 {
+		return line // colourless profile: nothing to paint
+	}
+	seq := marker[:i]
+	const reset = "\x1b[0m"
+	return seq + strings.ReplaceAll(line, reset, reset+seq) + reset
 }
 
 // spread lays out left and right on one line padded to width.
@@ -740,9 +799,12 @@ func spread(left, right string, width int) string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
-var sparkBlocks = []rune("▁▂▃▄▅▆▇█")
+// Capped at ▆ so adjacent rows can never fuse into a solid slab.
+var sparkBlocks = []rune("▁▂▃▄▅▆")
 
-// sparkline renders the last n latency samples; failures show as red ×.
+// sparkline renders the last n latency samples as a near-background texture;
+// failures show as a dim ╵. Only the newest sample takes the latency colour,
+// tying the trend to the ping dot without reintroducing a heat ramp.
 func sparkline(hist []float64, n int) string {
 	if len(hist) > n {
 		hist = hist[len(hist)-n:]
@@ -754,7 +816,7 @@ func sparkline(hist []float64, n int) string {
 		}
 	}
 	var b strings.Builder
-	for _, v := range hist {
+	for i, v := range hist {
 		if v < 0 {
 			b.WriteString(theme.Dim.Render("╵"))
 			continue
@@ -763,9 +825,11 @@ func sparkline(hist []float64, n int) string {
 		if maxV > 0 {
 			idx = int(v / maxV * float64(len(sparkBlocks)-1))
 		}
-		// Matte: a single muted foreground for the trend, not a heat ramp —
-		// the dot + latency already carry the colour signal.
-		b.WriteString(theme.Chip.Render(string(sparkBlocks[idx])))
+		style := theme.Spark
+		if i == len(hist)-1 {
+			style = lipgloss.NewStyle().Foreground(theme.LatencyColor(v))
+		}
+		b.WriteString(style.Render(string(sparkBlocks[idx])))
 	}
 	for i := len(hist); i < n; i++ {
 		b.WriteString(" ")

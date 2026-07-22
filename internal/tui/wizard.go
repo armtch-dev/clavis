@@ -610,7 +610,7 @@ func (w *wizardModel) viewTest() string {
 func stepIcon(s wstep) string {
 	switch s {
 	case stepUsePassword, stepPassword:
-		return theme.IconPwd + "  "
+		return theme.IconPwd + " " // "pw" is two cells wide — one space keeps alignment
 	case stepUseKey, stepKeySource, stepKeyPaste, stepKeyPath, stepPassphrase:
 		return theme.IconKey + "  "
 	}

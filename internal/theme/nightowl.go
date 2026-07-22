@@ -8,9 +8,11 @@ package theme
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 // Palette — hex values copied verbatim from scriptorium's $script:NightOwl table.
@@ -35,8 +37,8 @@ const (
 // Uniform monochrome icon set. The ︎ text-presentation selector forces
 // flat (non-emoji) rendering on glyphs that some terminals would colourise.
 const (
-	IconKey     = "⚿︎" // ⚿ squared key — key auth
-	IconPwd     = "✱"  // ✱ heavy asterisk — masked password
+	IconKey     = "⚷"  // ⚷ key glyph (wider font coverage than ⚿) — key auth
+	IconPwd     = "pw" // plain-text chip — password auth; survives any font
 	IconGear    = "⚙︎" // ⚙ settings
 	IconSync    = "⇅"  // ⇅ sync
 	IconLock    = "⚠︎" // ⚠ vault locked
@@ -68,7 +70,54 @@ var (
 	// uses. Faint is a dimmer steel for dividers and hairlines.
 	CardBg = lipgloss.Color(BlendHex(HexBg, HexWhite, 0.045))
 	Faint  = lipgloss.Color(BlendHex(HexBorder, HexBg, 0.45))
+
+	// Subtle sits between Fg and Muted: secondary *data* (host column, dates,
+	// header meta) — a step brighter than Muted, which is reserved for chrome
+	// (icons, group headings). Keeps real data from blending into decoration.
+	Subtle = lipgloss.Color(BlendHex(HexFg, HexBg, 0.45))
+
+	// SparkDim is a whisper above the bg for sparkline glyphs: a trend should
+	// read as texture, not compete with the data columns.
+	SparkDim = lipgloss.Color(BlendHex(HexMuted, HexBg, 0.40))
 )
+
+// Init adapts the blended tints (CardBg, Faint, Subtle, SparkDim) to the
+// terminal's actual background colour. The blends assume Night Owl's #011627;
+// on any other dark theme they land *darker* than the real background and
+// lose their intended relationship to it. Call once from main before the tea
+// program starts — the OSC query needs the terminal to itself.
+//
+// Light backgrounds are ignored: the Night Owl foregrounds are unreadable on
+// them regardless, so blending toward white would only make things worse.
+func Init() {
+	out := termenv.NewOutput(os.Stdout)
+	c := termenv.ConvertToRGB(out.BackgroundColor())
+	if 0.299*c.R+0.587*c.G+0.114*c.B >= 0.5 { // perceived luminance: not dark
+		return
+	}
+	hex := c.Hex()
+	// termenv falls back to ANSI black when the terminal can't be queried
+	// (tmux/screen, non-TTY, backgrounded process), which is indistinguishable
+	// from a real #000000 answer. Skip both: a spurious rebase in the failure
+	// case is worse than keeping Night Owl's near-black defaults on a truly
+	// black terminal.
+	if hex == "#000000" || hex == HexBg {
+		return
+	}
+	rebase(hex)
+}
+
+// rebase recomputes every bg-relative tint (and the styles built on them)
+// against the given background hex.
+func rebase(bgHex string) {
+	CardBg = lipgloss.Color(BlendHex(bgHex, HexWhite, 0.045))
+	Faint = lipgloss.Color(BlendHex(HexBorder, bgHex, 0.45))
+	Subtle = lipgloss.Color(BlendHex(HexFg, bgHex, 0.45))
+	SparkDim = lipgloss.Color(BlendHex(HexMuted, bgHex, 0.40))
+	Hint = Hint.Foreground(Faint)
+	Sub = Sub.Foreground(Subtle)
+	Spark = Spark.Foreground(SparkDim)
+}
 
 // Core text styles — matte: bold is used only for the single title accent.
 var (
@@ -77,8 +126,10 @@ var (
 	Label   = lipgloss.NewStyle().Foreground(Blue)
 	Value   = lipgloss.NewStyle().Foreground(Fg)
 	Accent  = lipgloss.NewStyle().Foreground(BrCyan)
+	Sub     = lipgloss.NewStyle().Foreground(Subtle)
 	Dim     = lipgloss.NewStyle().Foreground(Muted)
 	Hint    = lipgloss.NewStyle().Foreground(Faint)
+	Spark   = lipgloss.NewStyle().Foreground(SparkDim)
 
 	StatusOK   = lipgloss.NewStyle().Foreground(Green)
 	StatusWarn = lipgloss.NewStyle().Foreground(BrYellow)
@@ -87,9 +138,10 @@ var (
 	// MutedText kept for existing callers; equivalent to Dim.
 	MutedText = Dim
 
-	// Selected row: matte fill, no bold, paired with a pointer on the left.
-	Selected = lipgloss.NewStyle().Background(SelBg).Foreground(White)
-	SelTick  = lipgloss.NewStyle().Foreground(BrCyan)
+	// Selected row: the SelBg fill is painted by the list renderer itself
+	// (tui.selFill) so per-cell foregrounds survive on top of it — no forced
+	// white. SelTick is the pointer on the left.
+	SelTick = lipgloss.NewStyle().Foreground(BrCyan)
 
 	// Chip is a small metadata glyph (auth kind) — muted, understated.
 	Chip = lipgloss.NewStyle().Foreground(Muted)
