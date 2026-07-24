@@ -19,11 +19,50 @@ import (
 const storeVersion = 1
 
 type Script struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Content   string `json:"content"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Content   string   `json:"content"`
+	Tags      []string `json:"tags,omitempty"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
+}
+
+// MatchesTags reports whether the script applies to a host carrying the given
+// tags. An untagged script is universal; a tagged one needs at least one tag
+// in common with the host (case-insensitive).
+func (sc *Script) MatchesTags(hostTags []string) bool {
+	if len(sc.Tags) == 0 {
+		return true
+	}
+	for _, t := range sc.Tags {
+		for _, h := range hostTags {
+			if strings.EqualFold(t, h) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ParseTags splits space-separated tag input the same way the profile wizard
+// does: "#" prefixes stripped, blanks dropped, duplicates folded.
+func ParseTags(input string) []string {
+	return normTags(strings.Fields(input))
+}
+
+func normTags(tags []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, t := range tags {
+		t = strings.TrimPrefix(strings.TrimSpace(t), "#")
+		key := strings.ToLower(t)
+		if t == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, t)
+	}
+	return out
 }
 
 type Store struct {
@@ -128,6 +167,7 @@ func (s *Store) Remove(id string) error {
 
 func Validate(sc *Script) error {
 	sc.Name = strings.TrimSpace(sc.Name)
+	sc.Tags = normTags(sc.Tags)
 	if sc.Name == "" {
 		return errors.New("script needs a name")
 	}

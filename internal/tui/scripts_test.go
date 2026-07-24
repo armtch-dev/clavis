@@ -130,6 +130,85 @@ func TestEditorSavePersists(t *testing.T) {
 	}
 }
 
+// The picker only offers scripts whose tags match the target host: untagged
+// scripts everywhere, tagged scripts on hosts sharing a tag. Enter runs the
+// script the cursor is actually on in the filtered list.
+func TestPickerFiltersByHostTags(t *testing.T) {
+	m := newTestModel(t)
+	m.screen = scrList
+	m.width, m.height = 100, 30
+	p := addPasswordProfile(t, m, "docker-vm")
+	p.Tags = []string{"prod"}
+
+	for _, sc := range []script.Script{
+		{Name: "anywhere", Content: "uptime"},
+		{Name: "prod only", Content: "systemctl status app", Tags: []string{"Prod"}},
+		{Name: "dev only", Content: "make test", Tags: []string{"dev"}},
+	} {
+		if _, err := m.scripts.Add(sc); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m.dispatch(keyRunes("r"))
+	vis := m.scriptsUI.applicable()
+	if len(vis) != 2 {
+		t.Fatalf("applicable = %d scripts, want 2 (universal + tag match)", len(vis))
+	}
+	out := m.View()
+	if !strings.Contains(out, "anywhere") || !strings.Contains(out, "prod only") {
+		t.Error("matching scripts missing from the picker")
+	}
+	if strings.Contains(out, "dev only") {
+		t.Error("tag-mismatched script shown in the picker")
+	}
+	if !strings.Contains(out, "hidden") {
+		t.Error("picker does not mention the hidden script")
+	}
+
+	// Cursor row 1 in the filtered list is "prod only" — enter must run it,
+	// not whatever sits at index 1 of the raw store.
+	m.dispatch(keyRunes("j"))
+	_, cmd := m.dispatch(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil || m.pending == nil || m.pending.script == nil {
+		t.Fatal("enter did not start a script run")
+	}
+	if m.pending.script.name != "prod only" {
+		t.Errorf("ran %q, want %q", m.pending.script.name, "prod only")
+	}
+}
+
+// Tags typed in the editor are saved with the script and persist.
+func TestEditorSavesTags(t *testing.T) {
+	m := newTestModel(t)
+	m.screen = scrList
+	m.width, m.height = 100, 30
+	addPasswordProfile(t, m, "docker-vm")
+
+	m.dispatch(keyRunes("r"))
+	m.dispatch(keyRunes("n"))
+	m.dispatch(keyRunes("df -h"))
+	m.dispatch(tea.KeyMsg{Type: tea.KeyTab}) // content -> name
+	m.dispatch(keyRunes("disk"))
+	m.dispatch(tea.KeyMsg{Type: tea.KeyTab}) // name -> tags
+	m.dispatch(keyRunes("#prod web"))
+	m.dispatch(tea.KeyMsg{Type: tea.KeyCtrlD})
+	if m.scriptsUI.editing {
+		t.Fatalf("save did not close the editor (err %q)", m.scriptsUI.errs)
+	}
+	sc := m.scripts.ByName("disk")
+	if sc == nil || len(sc.Tags) != 2 || sc.Tags[0] != "prod" || sc.Tags[1] != "web" {
+		t.Fatalf("tags not saved: %+v", sc)
+	}
+	reloaded, err := script.LoadStore(m.cfgDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.ByName("disk"); got == nil || len(got.Tags) != 2 {
+		t.Errorf("tags not persisted to scripts.json: %+v", got)
+	}
+}
+
 // Delete asks for a one-key confirmation; any other key cancels.
 func TestPickerDeleteConfirms(t *testing.T) {
 	m := newTestModel(t)

@@ -78,6 +78,38 @@ func TestStoreUpdateRemove(t *testing.T) {
 	}
 }
 
+// Tags scope a script to hosts sharing a tag; untagged scripts are universal.
+// Tag input is normalized like profile tags: "#" stripped, dups folded.
+func TestTagsNormalizeAndMatch(t *testing.T) {
+	s := &Store{}
+	sc, err := s.Add(Script{Name: "deploy", Content: "true", Tags: []string{" #prod", "prod", "EU", ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sc.Tags) != 2 || sc.Tags[0] != "prod" || sc.Tags[1] != "EU" {
+		t.Fatalf("tags not normalized: %v", sc.Tags)
+	}
+
+	if !sc.MatchesTags([]string{"staging", "PROD"}) {
+		t.Error("shared tag (case-insensitive) should match")
+	}
+	if sc.MatchesTags([]string{"dev"}) {
+		t.Error("disjoint tags should not match")
+	}
+	if sc.MatchesTags(nil) {
+		t.Error("tagged script must not match an untagged host")
+	}
+
+	universal := Script{Name: "u", Content: "true"}
+	if !universal.MatchesTags(nil) || !universal.MatchesTags([]string{"anything"}) {
+		t.Error("untagged script should match every host")
+	}
+
+	if got := ParseTags(" #web  db web "); len(got) != 2 || got[0] != "web" || got[1] != "db" {
+		t.Errorf("ParseTags = %v", got)
+	}
+}
+
 func TestCorruptStoreRefusesToLoad(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "scripts.json"), []byte("{nope"), 0o600); err != nil {

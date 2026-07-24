@@ -69,7 +69,14 @@ The main interface is a list of SSH profiles. Keybindings:
 Press `r` on a host to open the script picker. Scripts are reusable snippets
 stored in `scripts.json` (synced with your profiles, never secret material) —
 create one with `n`, or paste something ad hoc and hit `ctrl+r` to run it once
-without saving. The host is preflighted first, then the terminal shows the
+without saving.
+
+Scripts can be tagged with the same tags you put on profiles. A tagged script
+only appears in the picker on hosts that share at least one of its tags
+(case-insensitive); an untagged script is universal and shows up everywhere.
+So `apt upgrade` tagged `#debian` is offered on every `#debian` host and none
+of the others. Set tags in the script editor (`tab` cycles script → name →
+tags; leave tags empty for a universal script). The host is preflighted first, then the terminal shows the
 script's live output; when it finishes you get the exit code and clavis waits
 for a keypress before returning to the list. Scripts are piped to `bash -s`
 on the remote side (falling back to plain `sh`), so nothing is written to the

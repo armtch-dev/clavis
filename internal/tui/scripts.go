@@ -25,20 +25,42 @@ import (
 type scriptsModel struct {
 	app                    *Model
 	profileID, profileName string
+	profileTags            []string
 
 	cursor     int
 	confirmDel bool
 
-	editing   bool   // editor pane active (new / edit / paste)
-	editID    string // "" while creating
-	name      textinput.Model
-	area      textarea.Model
-	areaFocus bool
-	errs      string
+	editing bool   // editor pane active (new / edit / paste)
+	editID  string // "" while creating
+	name    textinput.Model
+	tags    textinput.Model
+	area    textarea.Model
+	focus   int // one of focusContent/focusName/focusTags
+	errs    string
 }
 
+// Editor focus cycle: the script body first (paste target), then the metadata.
+const (
+	focusContent = iota
+	focusName
+	focusTags
+)
+
 func newScripts(app *Model, p *profile.Profile) *scriptsModel {
-	return &scriptsModel{app: app, profileID: p.ID, profileName: p.Name}
+	return &scriptsModel{app: app, profileID: p.ID, profileName: p.Name, profileTags: p.Tags}
+}
+
+// applicable is the picker's view of the store: scripts whose tags match the
+// target host (untagged scripts are universal). Tagged scripts only surface
+// on hosts sharing a tag — that's what scopes a script to a set of hosts.
+func (s *scriptsModel) applicable() []script.Script {
+	var out []script.Script
+	for _, sc := range s.app.scripts.Scripts {
+		if sc.MatchesTags(s.profileTags) {
+			out = append(out, sc)
+		}
+	}
+	return out
 }
 
 func (s *scriptsModel) openEditor(sc *script.Script) {
@@ -52,29 +74,37 @@ func (s *scriptsModel) openEditor(sc *script.Script) {
 	ti.Cursor.Style = theme.Accent
 	ti.Placeholder = "script name"
 
+	tg := textinput.New()
+	tg.Prompt = "› "
+	tg.PromptStyle = theme.Accent
+	tg.TextStyle = theme.Value
+	tg.Cursor.Style = theme.Accent
+	tg.Placeholder = "tags (space-separated; empty = any host)"
+
 	ta := textarea.New()
 	ta.Placeholder = "#!/usr/bin/env bash\n…type or paste the script here…"
 	ta.ShowLineNumbers = false
 	ta.SetWidth(clamp(s.app.width-16, 28, 72))
-	ta.SetHeight(clamp(s.app.height-14, 5, 14))
+	ta.SetHeight(clamp(s.app.height-17, 4, 14))
 	ta.CharLimit = 0
 
 	if sc != nil {
 		s.editID = sc.ID
 		ti.SetValue(sc.Name)
+		tg.SetValue(strings.Join(sc.Tags, " "))
 		ta.SetValue(sc.Content)
 	}
-	// Content is where the pasting happens — focus it first; the name can be
-	// filled in on save.
+	// Content is where the pasting happens — focus it first; the name and
+	// tags can be filled in on save.
 	ta.Focus()
-	s.name, s.area, s.areaFocus = ti, ta, true
+	s.name, s.tags, s.area, s.focus = ti, tg, ta, focusContent
 }
 
 func (m *Model) updateScripts(msg tea.Msg) (tea.Model, tea.Cmd) {
 	s := m.scriptsUI
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
-		if s.editing && s.areaFocus {
+		if s.editing && s.focus == focusContent {
 			var cmd tea.Cmd
 			s.area, cmd = s.area.Update(msg)
 			return m, cmd
@@ -89,7 +119,7 @@ func (m *Model) updateScripts(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) updateScriptPicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := m.scriptsUI
-	list := m.scripts.Scripts
+	list := s.applicable()
 
 	if s.confirmDel {
 		if key.String() == "y" || key.String() == "Y" {
@@ -98,8 +128,8 @@ func (m *Model) updateScriptPicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.setStatus(statusOK, "deleted script")
 				}
 			}
-			if s.cursor >= len(m.scripts.Scripts) {
-				s.cursor = max(0, len(m.scripts.Scripts)-1)
+			if n := len(s.applicable()); s.cursor >= n {
+				s.cursor = max(0, n-1)
 			}
 			s.confirmDel = false
 			return m, m.saveScripts("delete script")
@@ -124,7 +154,7 @@ func (m *Model) updateScriptPicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s.openEditor(nil)
 	case "e":
 		if s.cursor < len(list) {
-			s.openEditor(&list[s.cursor])
+			s.openEditor(m.scripts.ByID(list[s.cursor].ID))
 		}
 	case "d":
 		if s.cursor < len(list) {
@@ -148,17 +178,22 @@ func (m *Model) updateScriptEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s.editing, s.errs = false, ""
 		return m, nil
 	case tea.KeyTab:
-		if s.areaFocus {
-			s.area.Blur()
-			s.name.Focus()
-		} else {
-			s.name.Blur()
+		s.area.Blur()
+		s.name.Blur()
+		s.tags.Blur()
+		s.focus = (s.focus + 1) % 3
+		switch s.focus {
+		case focusContent:
 			s.area.Focus()
+		case focusName:
+			s.name.Focus()
+		case focusTags:
+			s.tags.Focus()
 		}
-		s.areaFocus = !s.areaFocus
 		return m, nil
 	case tea.KeyCtrlD:
-		sc := script.Script{ID: s.editID, Name: s.name.Value(), Content: s.area.Value()}
+		sc := script.Script{ID: s.editID, Name: s.name.Value(), Content: s.area.Value(),
+			Tags: script.ParseTags(s.tags.Value())}
 		var err error
 		if s.editID != "" {
 			err = m.scripts.Update(sc)
@@ -192,10 +227,13 @@ func (m *Model) updateScriptEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.startRunScript(profileID, name, content)
 	}
 	var cmd tea.Cmd
-	if s.areaFocus {
+	switch s.focus {
+	case focusContent:
 		s.area, cmd = s.area.Update(key)
-	} else {
+	case focusName:
 		s.name, cmd = s.name.Update(key)
+	case focusTags:
+		s.tags, cmd = s.tags.Update(key)
 	}
 	return m, cmd
 }
@@ -212,15 +250,25 @@ func (s *scriptsModel) view(width, height int) string {
 func (s *scriptsModel) viewPicker(width, height int) string {
 	inner := clamp(width-6, 44, 76)
 	cw := inner - 6
-	list := s.app.scripts.Scripts
+	list := s.applicable()
+	hidden := len(s.app.scripts.Scripts) - len(list)
 
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Run a script") +
-		theme.Dim.Render("  on ") + theme.Accent.Render(s.profileName) + "\n\n")
+		theme.Dim.Render("  on ") + theme.Accent.Render(s.profileName))
+	if len(s.profileTags) > 0 {
+		b.WriteString(theme.Tag.Render("  #" + strings.Join(s.profileTags, " #")))
+	}
+	b.WriteString("\n\n")
 
 	if len(list) == 0 {
-		b.WriteString(theme.Hint.Render("No scripts yet. Press ") + theme.Key("n") +
-			theme.Hint.Render(" to write or paste one.") + "\n")
+		if hidden > 0 {
+			b.WriteString(theme.Hint.Render("No scripts match this host's tags. Press ") + theme.Key("n") +
+				theme.Hint.Render(" to write or paste one.") + "\n")
+		} else {
+			b.WriteString(theme.Hint.Render("No scripts yet. Press ") + theme.Key("n") +
+				theme.Hint.Render(" to write or paste one.") + "\n")
+		}
 	}
 	maxRows := clamp(height-12, 3, 12)
 	start := 0
@@ -230,7 +278,10 @@ func (s *scriptsModel) viewPicker(width, height int) string {
 	for i := start; i < len(list) && i < start+maxRows; i++ {
 		sc := list[i]
 		line := theme.Value.Render(truncTo(sc.Name, cw/2))
-		if fl := firstLine(sc.Content); fl != "" {
+		if len(sc.Tags) > 0 {
+			line += theme.Tag.Render("  #" + strings.Join(sc.Tags, " #"))
+		}
+		if fl := firstLine(sc.Content); fl != "" && cw-lipgloss.Width(line)-3 > 6 {
 			line += theme.Dim.Render("  " + truncTo(fl, cw-lipgloss.Width(line)-3))
 		}
 		if i == s.cursor {
@@ -241,6 +292,9 @@ func (s *scriptsModel) viewPicker(width, height int) string {
 	}
 	if len(list) > maxRows {
 		b.WriteString(theme.Dim.Render(fmt.Sprintf("  %d–%d of %d", start+1, min(start+maxRows, len(list)), len(list))) + "\n")
+	}
+	if hidden > 0 {
+		b.WriteString(theme.Dim.Render(fmt.Sprintf("  %d script(s) hidden — tags don't match this host", hidden)) + "\n")
 	}
 
 	if s.confirmDel && s.cursor < len(list) {
@@ -267,6 +321,7 @@ func (s *scriptsModel) viewEditor(width, height int) string {
 	b.WriteString(theme.Title.Render(title) +
 		theme.Dim.Render("  runs on ") + theme.Accent.Render(s.profileName) + "\n\n")
 	b.WriteString(theme.Label.Render("name") + "\n" + s.name.View() + "\n\n")
+	b.WriteString(theme.Label.Render("tags") + theme.Hint.Render("  (runs on hosts sharing a tag; empty = any host)") + "\n" + s.tags.View() + "\n\n")
 	b.WriteString(theme.Label.Render("script") + theme.Hint.Render("  (paste works here)") + "\n")
 	b.WriteString(s.area.View())
 	if s.errs != "" {
@@ -274,7 +329,7 @@ func (s *scriptsModel) viewEditor(width, height int) string {
 	}
 	b.WriteString("\n\n" + theme.Divider(cw) + "\n")
 	b.WriteString(hintKeys([][2]string{
-		{"ctrl+r", "run without saving"}, {"ctrl+d", "save"}, {"tab", "name/script"}, {"esc", "back"},
+		{"ctrl+r", "run without saving"}, {"ctrl+d", "save"}, {"tab", "next field"}, {"esc", "back"},
 	}))
 	return center(theme.Panel.Width(inner).Render(b.String()), width, height)
 }
