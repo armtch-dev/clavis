@@ -32,6 +32,7 @@ const (
 	stepKeyPath   // textinput
 	stepPassphrase
 	stepProxyJump
+	stepCategory
 	stepTags
 	stepTest
 )
@@ -41,7 +42,7 @@ var allSteps = []wstep{
 	stepName, stepHost, stepPort, stepUser,
 	stepUsePassword, stepPassword,
 	stepUseKey, stepKeySource, stepKeyPaste, stepKeyPath,
-	stepPassphrase, stepProxyJump, stepTags, stepTest,
+	stepPassphrase, stepProxyJump, stepCategory, stepTags, stepTest,
 }
 
 var stepTitles = map[wstep]string{
@@ -57,6 +58,7 @@ var stepTitles = map[wstep]string{
 	stepKeyPath:     "Path to the private key file",
 	stepPassphrase:  "Key passphrase",
 	stepProxyJump:   "ProxyJump (optional)",
+	stepCategory:    "Category (optional — groups the list)",
 	stepTags:        "Tags (optional, space-separated)",
 	stepTest:        "Connection test",
 }
@@ -147,6 +149,9 @@ func (w *wizardModel) setStep(s wstep) {
 	case stepProxyJump:
 		ti.SetValue(w.draft.ProxyJump)
 		ti.Placeholder = "user@bastion.example.com:22 — enter to skip"
+	case stepCategory:
+		ti.SetValue(w.draft.Category)
+		ti.Placeholder = "e.g. cloud, local, work — enter to skip"
 	case stepTags:
 		ti.SetValue(strings.Join(w.draft.Tags, " "))
 	}
@@ -352,6 +357,8 @@ func (w *wizardModel) commitStep() error {
 			}
 		}
 		w.draft.ProxyJump = val
+	case stepCategory:
+		w.draft.Category = strings.TrimPrefix(val, "#")
 	case stepTags:
 		w.draft.Tags = nil
 		for _, t := range strings.Fields(val) {

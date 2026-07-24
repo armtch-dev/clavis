@@ -133,6 +133,7 @@ func TestViewListResponsive(t *testing.T) {
 		p, err := m.store.Add(profile.Profile{
 			Name: name, Host: name + ".example.com", Port: 22, User: "root",
 			Auth: []profile.AuthKind{profile.AuthKey}, Tags: []string{"prod", "eu"},
+			Category: "prod",
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -155,7 +156,7 @@ func TestViewListResponsive(t *testing.T) {
 	}
 
 	// Wide terminal: detail side panel plus each sort mode (including the
-	// tag-group headings) must render without panics and stay within the
+	// category headings) must render without panics and stay within the
 	// terminal height. Give one host a down status with a LastSeen so the
 	// relative "↓ …" cell and the detail pane's down state render too.
 	vis := m.visible()
@@ -168,7 +169,7 @@ func TestViewListResponsive(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []sortMode{sortDefault, sortLatency, sortTags} {
+	for _, mode := range []sortMode{sortDefault, sortLatency, sortCategory} {
 		m.sortMode = mode
 		for _, s := range [][2]int{{140, 45}, {140, 12}, {130, 20}} {
 			m.width, m.height = s[0], s[1]
@@ -186,9 +187,9 @@ func TestViewListResponsive(t *testing.T) {
 	if out := m.View(); !strings.Contains(out, "↓ 7m") {
 		t.Errorf("down host with LastSeen should show relative age, got frame without \"↓ 7m\"")
 	}
-	m.sortMode = sortTags
-	if out := m.View(); !strings.Contains(out, "— prod —") || !strings.Contains(out, "— untagged —") {
-		t.Errorf("tag-grouped mode should render group headings")
+	m.sortMode = sortCategory
+	if out := m.View(); !strings.Contains(out, "— prod —") || !strings.Contains(out, "— uncategorized —") {
+		t.Errorf("category mode should render group headings")
 	}
 	m.sortMode = sortDefault
 	m.cursor = 0
@@ -206,7 +207,7 @@ func TestViewListResponsive(t *testing.T) {
 	// sync remote all compete with the title for one line — at 70-90 cols the
 	// meta must drop entries rather than overflow and wrap the frame.
 	m.cfg.Sync.Remote = "https://github.com/yshah/clavis-sync.git"
-	for _, mode := range []sortMode{sortDefault, sortLatency, sortTags} {
+	for _, mode := range []sortMode{sortDefault, sortLatency, sortCategory} {
 		m.sortMode = mode
 		for _, s := range [][2]int{{70, 24}, {80, 24}, {90, 24}, {96, 24}, {100, 24}, {110, 24}, {129, 24}} {
 			m.width, m.height = s[0], s[1]

@@ -74,6 +74,8 @@ type Model struct {
 	cursor    int
 	filter    string
 	filtering bool
+	catTarget string // profile ID being re-categorized with "c", "" when idle
+	catInput  string
 	sortMode  sortMode        // cycled with "o"
 	testing   map[string]bool // profile IDs with an in-flight test
 
@@ -660,8 +662,11 @@ func (m *Model) legend(avail int) string {
 	if m.filtering {
 		return hintKeys([][2]string{{"enter", "apply"}, {"esc", "clear"}})
 	}
+	if m.catTarget != "" {
+		return hintKeys([][2]string{{"enter", "set category"}, {"esc", "cancel"}})
+	}
 	tiers := [][][2]string{
-		{{"enter", "connect"}, {"r", "run script"}, {"a", "add"}, {"e", "edit"}, {"d", "delete"}, {"t", "test"},
+		{{"enter", "connect"}, {"r", "run script"}, {"a", "add"}, {"e", "edit"}, {"c", "category"}, {"d", "delete"}, {"t", "test"},
 			{"s", "sync"}, {"g", "settings"}, {"i", "import"}, {"o", "sort"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
 		{{"enter", "connect"}, {"r", "run"}, {"a", "add"}, {"e", "edit"}, {"d", "delete"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
 		{{"enter", "connect"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},

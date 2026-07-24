@@ -18,21 +18,21 @@ import (
 )
 
 // sortMode cycles on "o": stored order, latency (fastest reachable first),
-// or grouped by first tag.
+// or grouped by category.
 type sortMode int
 
 const (
 	sortDefault sortMode = iota
 	sortLatency
-	sortTags
+	sortCategory
 )
 
 func (s sortMode) String() string {
 	switch s {
 	case sortLatency:
 		return "latency"
-	case sortTags:
-		return "tag groups"
+	case sortCategory:
+		return "categories"
 	default:
 		return "default order"
 	}
@@ -46,7 +46,7 @@ func (m *Model) visible() []profile.Profile {
 		q := strings.ToLower(m.filter)
 		var out []profile.Profile
 		for _, p := range base {
-			hay := strings.ToLower(p.Name + " " + p.Host + " " + p.User + " " + strings.Join(p.Tags, " "))
+			hay := strings.ToLower(p.Name + " " + p.Host + " " + p.User + " " + p.Category + " " + strings.Join(p.Tags, " "))
 			if strings.Contains(hay, q) {
 				out = append(out, p)
 			}
@@ -85,28 +85,29 @@ func (m *Model) sortProfiles(in []profile.Profile) []profile.Profile {
 			}
 			return li < lj
 		})
-	case sortTags:
-		// Grouped by first tag alphabetically; untagged sinks to the bottom.
+	case sortCategory:
+		// Grouped by category alphabetically (case-insensitive);
+		// uncategorized sinks to the bottom.
 		sort.SliceStable(out, func(i, j int) bool {
-			ti, tj := len(out[i].Tags) > 0, len(out[j].Tags) > 0
-			if ti != tj {
-				return ti
+			ci, cj := out[i].Category != "", out[j].Category != ""
+			if ci != cj {
+				return ci
 			}
-			if !ti {
+			if !ci {
 				return false
 			}
-			return out[i].Tags[0] < out[j].Tags[0]
+			return strings.ToLower(out[i].Category) < strings.ToLower(out[j].Category)
 		})
 	}
 	return out
 }
 
-// groupTag names the tag group a profile belongs to in sortTags mode.
-func groupTag(p profile.Profile) string {
-	if len(p.Tags) == 0 {
-		return "untagged"
+// groupCategory names the group a profile belongs to in sortCategory mode.
+func groupCategory(p profile.Profile) string {
+	if p.Category == "" {
+		return "uncategorized"
 	}
-	return p.Tags[0]
+	return p.Category
 }
 
 func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -132,6 +133,35 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Inline category prompt ("c"): retag the selected host without walking
+	// the whole edit wizard.
+	if m.catTarget != "" {
+		switch key.Type {
+		case tea.KeyEsc:
+			m.catTarget, m.catInput = "", ""
+		case tea.KeyEnter:
+			if p := m.store.ByID(m.catTarget); p != nil {
+				p.Category = strings.TrimPrefix(strings.TrimSpace(m.catInput), "#")
+				name := p.Name
+				m.catTarget, m.catInput = "", ""
+				if p.Category == "" {
+					m.setStatus(statusOK, name+" is now uncategorized")
+				} else {
+					m.setStatus(statusOK, name+" → "+p.Category)
+				}
+				return m, m.saveAll("set category on " + name)
+			}
+			m.catTarget, m.catInput = "", ""
+		case tea.KeyBackspace:
+			if len(m.catInput) > 0 {
+				m.catInput = m.catInput[:len(m.catInput)-1]
+			}
+		case tea.KeyRunes:
+			m.catInput += string(key.Runes)
+		}
+		return m, nil
+	}
+
 	vis := m.visible()
 	switch key.String() {
 	case "q", "ctrl+c":
@@ -152,6 +182,10 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "/":
 		m.filtering = true
 		m.filter = ""
+	case "c":
+		if p := m.selected(vis); p != nil {
+			m.catTarget, m.catInput = p.ID, p.Category
+		}
 	case "o":
 		m.sortMode = (m.sortMode + 1) % 3
 		m.clampCursor()
@@ -360,6 +394,15 @@ func (m *Model) viewList() string {
 
 	// Header: title on the left, quiet meta on the right.
 	left := pad + theme.Title.Render("clavis")
+	if m.catTarget != "" {
+		name := ""
+		if p := m.store.ByID(m.catTarget); p != nil {
+			name = p.Name
+		}
+		left += theme.Dim.Render("  category for ") + theme.Value.Render(name) +
+			theme.Dim.Render("  ") + theme.Value.Render(m.catInput) + theme.Accent.Render("▌") +
+			theme.Hint.Render("  enter set · esc cancel")
+	}
 	if m.filtering || m.filter != "" {
 		cursor := ""
 		if m.filtering {
@@ -454,9 +497,9 @@ type listEntry struct {
 }
 
 // listEntries expands vis into display lines, inserting a heading before
-// each tag group when sortTags is active.
+// each category when sortCategory is active.
 func (m *Model) listEntries(vis []profile.Profile) []listEntry {
-	if m.sortMode != sortTags {
+	if m.sortMode != sortCategory {
 		out := make([]listEntry, len(vis))
 		for i := range vis {
 			out[i] = listEntry{idx: i}
@@ -466,7 +509,7 @@ func (m *Model) listEntries(vis []profile.Profile) []listEntry {
 	out := make([]listEntry, 0, len(vis)+4)
 	prev := ""
 	for i, p := range vis {
-		if g := groupTag(p); i == 0 || g != prev {
+		if g := groupCategory(p); i == 0 || g != prev {
 			out = append(out, listEntry{heading: g})
 			prev = g
 		}
@@ -560,6 +603,9 @@ func (m *Model) renderDetail(p *profile.Profile, l listLayout, avail int) string
 		auth = append(auth, "none")
 	}
 	b.WriteString(label("auth") + theme.Value.Render(strings.Join(auth, "  ")) + "\n")
+	if p.Category != "" {
+		b.WriteString(label("group") + theme.Value.Render(truncTo(p.Category, cw-6)) + "\n")
+	}
 	if len(p.Tags) > 0 {
 		b.WriteString(label("tags") + theme.Tag.Render(truncTo("#"+strings.Join(p.Tags, " #"), cw-6)) + "\n")
 	}
@@ -868,7 +914,8 @@ func (m *Model) viewHelp() string {
 		{"s", "sync now (guarded, encrypted git push)"},
 		{"g", "settings — GitHub token, repo, autosync, keychain"},
 		{"i", "import hosts from ~/.ssh/config"},
-		{"o", "cycle sort: stored order / latency / tag groups"},
+		{"c", "set the selected host's category (list grouping)"},
+		{"o", "cycle sort: stored order / latency / categories"},
 		{"/", "filter profiles"},
 		{"j k ↑ ↓", "move"},
 		{"q", "quit"},
