@@ -11,6 +11,7 @@ import (
 
 	"github.com/armtch-dev/clavis/internal/config"
 	"github.com/armtch-dev/clavis/internal/profile"
+	"github.com/armtch-dev/clavis/internal/script"
 	"github.com/armtch-dev/clavis/internal/vault"
 )
 
@@ -36,7 +37,8 @@ func newTestModel(t *testing.T) *Model {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(dir, cfg, store, v, "")
+	scripts, _ := script.LoadStore(dir)
+	m := New(dir, cfg, store, scripts, v, "")
 	t.Cleanup(m.Close)
 	return m
 }

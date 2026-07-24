@@ -51,6 +51,7 @@ The main interface is a list of SSH profiles. Keybindings:
 | Key | Action |
 | --- | --- |
 | `enter` | Connect to the selected host |
+| `r` | Run a script on the selected host (pick a saved one, or paste and go) |
 | `a` | Add a profile (step-by-step wizard; paste a private key or point to a file) |
 | `e` | Edit the selected profile |
 | `d` | Delete the selected profile and its vault secrets |
@@ -62,6 +63,17 @@ The main interface is a list of SSH profiles. Keybindings:
 | `j/k` or `↑/↓` | Move cursor up/down |
 | `?` | Show help overlay |
 | `q` or `ctrl+c` | Quit |
+
+### Running scripts
+
+Press `r` on a host to open the script picker. Scripts are reusable snippets
+stored in `scripts.json` (synced with your profiles, never secret material) —
+create one with `n`, or paste something ad hoc and hit `ctrl+r` to run it once
+without saving. The host is preflighted first, then the terminal shows the
+script's live output; when it finishes you get the exit code and clavis waits
+for a keypress before returning to the list. Scripts are piped to `bash -s`
+on the remote side (falling back to plain `sh`), so nothing is written to the
+remote filesystem. ProxyJump hosts aren't supported for script runs yet.
 
 ### CLI Subcommands
 

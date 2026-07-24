@@ -110,7 +110,7 @@ AGE-SECRET-KEY-*
 func allowedPath(rel string) error {
 	rel = filepath.ToSlash(rel)
 	switch rel {
-	case "profiles.json", "config.json", "vault.meta", ".gitignore", "README.md":
+	case "profiles.json", "scripts.json", "config.json", "vault.meta", ".gitignore", "README.md":
 		return nil
 	}
 	if strings.HasPrefix(rel, "vault/") {
