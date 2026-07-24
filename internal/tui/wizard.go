@@ -106,6 +106,9 @@ func (w *wizardModel) setStep(s wstep) {
 	if s == stepKeyPaste {
 		ta := textarea.New()
 		ta.Placeholder = "-----BEGIN OPENSSH PRIVATE KEY-----\n…paste the whole key here…\n-----END OPENSSH PRIVATE KEY-----"
+		if w.hasStoredKey() {
+			ta.Placeholder = "leave empty and press ctrl+d to keep the stored key,\nor paste a replacement here"
+		}
 		ta.ShowLineNumbers = false
 		ta.SetWidth(clamp(w.app.width-16, 28, 64))
 		ta.SetHeight(clamp(w.app.height-14, 5, 9))
@@ -156,6 +159,12 @@ func (w *wizardModel) setStep(s wstep) {
 		ti.SetValue(strings.Join(w.draft.Tags, " "))
 	}
 	w.input = ti
+}
+
+// hasStoredKey reports whether the profile being edited already has a key in
+// the vault, i.e. "keep the stored key" is a valid answer.
+func (w *wizardModel) hasStoredKey() bool {
+	return w.editing && w.app.vault.Has(w.draft.KeySecret())
 }
 
 // skip reports whether a step doesn't apply given the answers so far.
@@ -227,7 +236,8 @@ func (m *Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Choice steps take single keys.
+	// Choice steps take single keys. When editing, enter keeps the current
+	// answer so an already-configured auth method never has to be re-entered.
 	switch w.step {
 	case stepUsePassword, stepUseKey:
 		switch key.String() {
@@ -235,6 +245,14 @@ func (m *Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			w.setBool(true)
 		case "n", "N":
 			w.setBool(false)
+		case "enter":
+			if w.editing {
+				if w.step == stepUsePassword {
+					w.setBool(w.usePassword)
+				} else {
+					w.setBool(w.useKey)
+				}
+			}
 		}
 		return m, nil
 	case stepKeySource:
@@ -245,6 +263,12 @@ func (m *Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "f", "F":
 			w.keySource = "file"
 			w.setStep(w.next(w.step))
+		case "k", "K", "enter":
+			// Keep the stored key: skips the paste/path steps entirely.
+			if w.hasStoredKey() {
+				w.keySource = "keep"
+				w.setStep(w.next(w.step))
+			}
 		}
 		return m, nil
 	case stepTest:
@@ -531,9 +555,24 @@ func (w *wizardModel) view(width, height int) string {
 	switch w.step {
 	case stepUsePassword, stepUseKey:
 		b.WriteString(choiceRow([][2]string{{"y", "yes"}, {"n", "no"}}))
+		if w.editing {
+			cur := "no"
+			if (w.step == stepUsePassword && w.usePassword) || (w.step == stepUseKey && w.useKey) {
+				cur = "yes"
+			}
+			b.WriteString("\n\n" + theme.Hint.Render("enter keeps the current answer: ") + theme.Value.Render(cur))
+		}
 	case stepKeySource:
-		b.WriteString(choiceRow([][2]string{{"p", "paste key"}, {"f", "from file"}}))
-		b.WriteString("\n\n" + theme.Hint.Render("Pasted keys are encrypted straight into the vault — the\noriginal file is never referenced again."))
+		opts := [][2]string{{"p", "paste key"}, {"f", "from file"}}
+		if w.hasStoredKey() {
+			opts = append(opts, [2]string{"k", "keep stored key"})
+		}
+		b.WriteString(choiceRow(opts))
+		if w.hasStoredKey() {
+			b.WriteString("\n\n" + theme.Hint.Render("enter keeps the key already in the vault — nothing to re-enter."))
+		} else {
+			b.WriteString("\n\n" + theme.Hint.Render("Pasted keys are encrypted straight into the vault — the\noriginal file is never referenced again."))
+		}
 	case stepKeyPaste:
 		b.WriteString(w.area.View())
 	case stepTest:
@@ -578,7 +617,15 @@ func (w *wizardModel) progress(width int) string {
 
 func (w *wizardModel) footer() string {
 	switch w.step {
-	case stepUsePassword, stepUseKey, stepKeySource:
+	case stepUsePassword, stepUseKey:
+		if w.editing {
+			return theme.Hint.Render("choose a key · enter keep current · esc back")
+		}
+		return theme.Hint.Render("choose a key · esc back")
+	case stepKeySource:
+		if w.hasStoredKey() {
+			return theme.Hint.Render("choose a key · enter keep stored · esc back")
+		}
 		return theme.Hint.Render("choose a key · esc back")
 	case stepKeyPaste:
 		return theme.Hint.Render("ctrl+d save key · esc back")

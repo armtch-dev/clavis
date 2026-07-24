@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/armtch-dev/clavis/internal/config"
@@ -90,6 +91,97 @@ func TestWizardPasteEncryptsKeyIntoVault(t *testing.T) {
 	// The wizard must wipe its plaintext copy after saving.
 	if len(w.keyPEM) != 0 {
 		t.Fatal("wizard kept the plaintext key after save")
+	}
+}
+
+// Editing a profile with stored auth must never force re-entering it: enter
+// keeps the current answer on the choice steps, and the key-source step's
+// "keep" path skips the paste/path steps entirely.
+func TestWizardEditKeepsStoredAuthWithoutReentry(t *testing.T) {
+	m := newTestModel(t)
+	keyPEM := genKeyPEM(t)
+	p, err := m.store.Add(profile.Profile{
+		Name: "edit-me", Host: "192.0.2.9", Port: 22, User: "root",
+		Auth: []profile.AuthKind{profile.AuthKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.vault.Put(p.KeySecret(), keyPEM); err != nil {
+		t.Fatal(err)
+	}
+
+	w := newWizard(m, p)
+	// enter through the identity steps (values prefilled from the profile).
+	for _, s := range []wstep{stepName, stepHost, stepPort, stepUser} {
+		if w.step != s {
+			t.Fatalf("expected step %v, at %v", s, w.step)
+		}
+		if err := w.commitStep(); err != nil {
+			t.Fatalf("step %v: %v", s, err)
+		}
+		w.setStep(w.next(w.step))
+	}
+
+	m.wizard = w
+	m.screen = scrWizard
+	// enter keeps "no password".
+	if w.step != stepUsePassword {
+		t.Fatalf("at %v, want stepUsePassword", w.step)
+	}
+	m.dispatch(tea.KeyMsg{Type: tea.KeyEnter})
+	if w.usePassword {
+		t.Fatal("enter changed the password answer")
+	}
+	// enter keeps "use key".
+	if w.step != stepUseKey {
+		t.Fatalf("at %v, want stepUseKey", w.step)
+	}
+	m.dispatch(tea.KeyMsg{Type: tea.KeyEnter})
+	if !w.useKey {
+		t.Fatal("enter changed the key answer")
+	}
+	// enter keeps the stored key and skips paste/path entirely.
+	if w.step != stepKeySource {
+		t.Fatalf("at %v, want stepKeySource", w.step)
+	}
+	m.dispatch(tea.KeyMsg{Type: tea.KeyEnter})
+	if w.step != stepProxyJump {
+		t.Fatalf("keep-stored-key should land on stepProxyJump, at %v", w.step)
+	}
+	if w.keySource != "keep" || len(w.keyPEM) != 0 {
+		t.Fatalf("keySource = %q, keyPEM %d bytes", w.keySource, len(w.keyPEM))
+	}
+
+	// Saving must leave the stored key untouched.
+	w.draft.Auth = []profile.AuthKind{profile.AuthKey}
+	w.save(m)
+	got, err := m.vault.Get(p.KeySecret())
+	if err != nil {
+		t.Fatalf("stored key gone after edit: %v", err)
+	}
+	if !bytes.Equal(got, keyPEM) {
+		t.Fatal("stored key changed by an edit that never touched it")
+	}
+}
+
+// A new profile (not editing) must not accept enter/k on the choice steps —
+// there is nothing stored to keep.
+func TestWizardNewProfileChoiceStepsRequireAnswer(t *testing.T) {
+	m := newTestModel(t)
+	w := newWizard(m, nil)
+	w.setStep(stepUsePassword)
+	m.wizard = w
+	m.screen = scrWizard
+	m.dispatch(tea.KeyMsg{Type: tea.KeyEnter})
+	if w.step != stepUsePassword {
+		t.Fatal("enter advanced a choice step on a new profile")
+	}
+	w.useKey = true
+	w.setStep(stepKeySource)
+	m.dispatch(tea.KeyMsg{Type: tea.KeyEnter})
+	if w.step != stepKeySource {
+		t.Fatal("enter advanced key source with no stored key")
 	}
 }
 
