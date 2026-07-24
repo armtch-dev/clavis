@@ -35,7 +35,12 @@ type Profile struct {
 	User      string     `json:"user"`
 	Auth      []AuthKind `json:"auth"` // which credentials exist in the vault
 	ProxyJump string     `json:"proxy_jump,omitempty"`
-	Tags      []string   `json:"tags,omitempty"`
+	// Category is the list's grouping bucket ("cloud", "local", "work") — a
+	// single label, deliberately separate from Tags: tags are free-form
+	// labels used for filtering and script matching, the category is where
+	// the host lives in the list.
+	Category string   `json:"category,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
 	Notes     string     `json:"notes,omitempty"`
 	// HostKeyFP is the pinned SHA256 fingerprint recorded on first successful
 	// connection (TOFU). A later mismatch triggers a loud MITM warning.

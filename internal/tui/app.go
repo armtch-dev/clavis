@@ -74,7 +74,9 @@ type Model struct {
 	cursor    int
 	filter    string
 	filtering bool
-	sortMode  sortMode        // cycled with "o"
+	catTarget string // profile ID being re-categorized with "c", "" when idle
+	catInput  string
+	sortMode  sortMode        // toggled with "o": in-group order (stored/latency)
 	testing   map[string]bool // profile IDs with an in-flight test
 
 	// connect preflight: the profile being reachability-checked before the
@@ -606,10 +608,17 @@ func (m *Model) View() string {
 	if m.help {
 		body = center(m.viewHelp(), m.width, bodyH)
 	}
-	// Pin the footer to the bottom of the terminal.
+	// Pin the footer to the bottom of the terminal — and never let an
+	// over-tall body push it past the last row: a frame taller than the
+	// terminal scrolls the whole layout. Clip the body's tail instead.
 	body = strings.TrimRight(body, "\n")
-	if h := lipgloss.Height(body); m.height > 0 && h < bodyH {
-		body += strings.Repeat("\n", bodyH-h)
+	if m.height > 0 {
+		if h := lipgloss.Height(body); h < bodyH {
+			body += strings.Repeat("\n", bodyH-h)
+		} else if h > bodyH {
+			lines := strings.Split(body, "\n")
+			body = strings.Join(lines[:bodyH], "\n")
+		}
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, body, m.viewStatusBar())
 }
@@ -650,7 +659,8 @@ func (m *Model) viewStatusBar() string {
 	}
 
 	if m.screen == scrList && !m.help {
-		lines = append(lines, pad+m.legend(width-2*len(pad)))
+		// Tinted like the header bar so both read as anchored chrome.
+		lines = append(lines, chromeFill(pad+m.legend(width-2*len(pad)), width))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -660,8 +670,11 @@ func (m *Model) legend(avail int) string {
 	if m.filtering {
 		return hintKeys([][2]string{{"enter", "apply"}, {"esc", "clear"}})
 	}
+	if m.catTarget != "" {
+		return hintKeys([][2]string{{"enter", "set category"}, {"esc", "cancel"}})
+	}
 	tiers := [][][2]string{
-		{{"enter", "connect"}, {"r", "run script"}, {"a", "add"}, {"e", "edit"}, {"d", "delete"}, {"t", "test"},
+		{{"enter", "connect"}, {"r", "run script"}, {"a", "add"}, {"e", "edit"}, {"c", "category"}, {"d", "delete"}, {"t", "test"},
 			{"s", "sync"}, {"g", "settings"}, {"i", "import"}, {"o", "sort"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
 		{{"enter", "connect"}, {"r", "run"}, {"a", "add"}, {"e", "edit"}, {"d", "delete"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
 		{{"enter", "connect"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},

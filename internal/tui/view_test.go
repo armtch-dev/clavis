@@ -125,6 +125,132 @@ func TestSelectionFillNotTorn(t *testing.T) {
 	}
 }
 
+// chromeFill (header/footer chrome tint) must emit exactly `width` cells —
+// clipping over-wide input, padding short input — and re-open the surface
+// background after every per-cell reset, like selFill.
+func TestChromeFillWidth(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(old)
+
+	const reset = "\x1b[0m"
+	marker := lipgloss.NewStyle().Background(theme.Surface).Render("|")
+	seq := marker[:strings.Index(marker, "|")]
+	if seq == "" {
+		t.Fatal("no background sequence produced under TrueColor profile")
+	}
+
+	short := theme.Title.Render("clavis") + "  " + theme.Dim.Render("meta")
+	long := strings.Repeat("x", 80)
+	for _, tc := range []struct {
+		in string
+		w  int
+	}{{short, 40}, {long, 40}, {"", 12}} {
+		out := chromeFill(tc.in, tc.w)
+		if got := lipgloss.Width(out); got != tc.w {
+			t.Errorf("chromeFill(%q, %d) width = %d", tc.in, tc.w, got)
+		}
+	}
+	out := chromeFill(short, 40)
+	body := strings.TrimSuffix(out, reset)
+	if n, m := strings.Count(body, reset), strings.Count(body, reset+seq); n != m {
+		t.Errorf("%d of %d inner resets re-open the chrome background", m, n)
+	}
+}
+
+// The fleet summary strip: segments appear only when they apply, and the
+// whole strip disappears when there is nothing to say.
+func TestFleetSummary(t *testing.T) {
+	m := newTestModel(t)
+	m.width, m.height = 100, 30
+	l := m.layoutList()
+
+	// Nothing probed, no remote: no strip at all.
+	if s := m.fleetSummary(l); s != "" {
+		t.Errorf("empty fleet produced a strip: %q", s)
+	}
+
+	add := func(name string) *profile.Profile {
+		p, err := m.store.Add(profile.Profile{
+			Name: name, Host: name + ".example.com", Port: 22, User: "root",
+			Auth: []profile.AuthKind{profile.AuthKey},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	up1, up2 := add("u1"), add("u2")
+	m.statuses[up1.ID] = probe.Status{ProfileID: up1.ID, Reachable: true, LatencyMs: 10}
+	m.statuses[up2.ID] = probe.Status{ProfileID: up2.ID, Reachable: true, LatencyMs: 30}
+
+	s := m.fleetSummary(l)
+	if !strings.Contains(s, "2 up") || !strings.Contains(s, "avg 20ms") {
+		t.Errorf("strip missing up/avg segments: %q", s)
+	}
+	if strings.Contains(s, "down") || strings.Contains(s, theme.IconSync) {
+		t.Errorf("strip has segments that don't apply: %q", s)
+	}
+
+	dn := add("d1")
+	m.statuses[dn.ID] = probe.Status{ProfileID: dn.ID, Reachable: false}
+	m.cfg.Sync.Remote = "https://github.com/yshah/clavis-sync.git"
+	s = m.fleetSummary(l)
+	if !strings.Contains(s, "1 down") || !strings.Contains(s, "yshah/clavis-sync") {
+		t.Errorf("strip missing down/remote segments: %q", s)
+	}
+	if w := lipgloss.Width(s); w > l.width {
+		t.Errorf("strip is %d cells wide, frame is %d", w, l.width)
+	}
+
+	// In a tall frame the strip is anchored just above the footer.
+	m.screen = scrList
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != 30 {
+		t.Fatalf("frame height = %d, want 30", len(lines))
+	}
+	if !strings.Contains(lines[len(lines)-3], "avg") {
+		t.Errorf("strip not anchored above the footer, line = %q", lines[len(lines)-3])
+	}
+}
+
+// The host-key fingerprint wraps in full across two lines; only when two
+// lines can't hold it (or the pane is too short to wrap) does it mid-truncate.
+func TestFingerprintLines(t *testing.T) {
+	label := func(s string) string { return s }
+	fp := "SHA256:Qcvfy5RXG3sVdD2Yb3D5bDT0FhSqYRTYUn+aZLDGCfk" // 50 runes
+	got := fingerprintLines(fp, 30+6, true, label)             // w=30: needs 2 lines
+	if len(got) != 2 {
+		t.Fatalf("expected a 2-line wrap, got %d line(s): %q", len(got), got)
+	}
+	joined := strings.TrimPrefix(stripAnsi(got[0]), "key") + strings.TrimLeft(stripAnsi(got[1]), " ")
+	if joined != fp {
+		t.Errorf("wrapped fingerprint = %q, want the full %q", joined, fp)
+	}
+	// wrap disabled (short pane): one mid-truncated line.
+	if got := fingerprintLines(fp, 36, false, label); len(got) != 1 || !strings.Contains(stripAnsi(got[0]), "…") {
+		t.Errorf("no-wrap tier should mid-truncate to one line, got %q", got)
+	}
+	// Absurdly long fingerprint: two lines can't hold it — mid-truncate.
+	if got := fingerprintLines(strings.Repeat("a", 200), 36, true, label); len(got) != 1 {
+		t.Errorf("overlong fingerprint should fall back to one line, got %d", len(got))
+	}
+}
+
+func stripAnsi(s string) string {
+	for {
+		i := strings.Index(s, "\x1b[")
+		if i < 0 {
+			return s
+		}
+		j := strings.IndexByte(s[i:], 'm')
+		if j < 0 {
+			return s
+		}
+		s = s[:i] + s[i+j+1:]
+	}
+}
+
 // Render the list at a spread of terminal sizes: no panics, the key legend is
 // always present, and the frame never exceeds the terminal height.
 func TestViewListResponsive(t *testing.T) {
@@ -133,6 +259,7 @@ func TestViewListResponsive(t *testing.T) {
 		p, err := m.store.Add(profile.Profile{
 			Name: name, Host: name + ".example.com", Port: 22, User: "root",
 			Auth: []profile.AuthKind{profile.AuthKey}, Tags: []string{"prod", "eu"},
+			Category: "prod",
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -154,9 +281,9 @@ func TestViewListResponsive(t *testing.T) {
 		}
 	}
 
-	// Wide terminal: detail side panel plus each sort mode (including the
-	// tag-group headings) must render without panics and stay within the
-	// terminal height. Give one host a down status with a LastSeen so the
+	// Wide terminal: detail side panel plus both in-group orderings (with the
+	// always-on category headings) must render without panics and stay within
+	// the terminal height. Give one host a down status with a LastSeen so the
 	// relative "↓ …" cell and the detail pane's down state render too.
 	vis := m.visible()
 	down := vis[len(vis)-1]
@@ -168,7 +295,7 @@ func TestViewListResponsive(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []sortMode{sortDefault, sortLatency, sortTags} {
+	for _, mode := range []sortMode{sortDefault, sortLatency} {
 		m.sortMode = mode
 		for _, s := range [][2]int{{140, 45}, {140, 12}, {130, 20}} {
 			m.width, m.height = s[0], s[1]
@@ -186,9 +313,9 @@ func TestViewListResponsive(t *testing.T) {
 	if out := m.View(); !strings.Contains(out, "↓ 7m") {
 		t.Errorf("down host with LastSeen should show relative age, got frame without \"↓ 7m\"")
 	}
-	m.sortMode = sortTags
-	if out := m.View(); !strings.Contains(out, "— prod —") || !strings.Contains(out, "— untagged —") {
-		t.Errorf("tag-grouped mode should render group headings")
+	// Category group headings render always, carrying host/up counts.
+	if out := m.View(); !strings.Contains(out, "prod · ") || !strings.Contains(out, "uncategorized · ") {
+		t.Errorf("category group headings with counts should always render")
 	}
 	m.sortMode = sortDefault
 	m.cursor = 0
@@ -206,7 +333,7 @@ func TestViewListResponsive(t *testing.T) {
 	// sync remote all compete with the title for one line — at 70-90 cols the
 	// meta must drop entries rather than overflow and wrap the frame.
 	m.cfg.Sync.Remote = "https://github.com/yshah/clavis-sync.git"
-	for _, mode := range []sortMode{sortDefault, sortLatency, sortTags} {
+	for _, mode := range []sortMode{sortDefault, sortLatency} {
 		m.sortMode = mode
 		for _, s := range [][2]int{{70, 24}, {80, 24}, {90, 24}, {96, 24}, {100, 24}, {110, 24}, {129, 24}} {
 			m.width, m.height = s[0], s[1]
