@@ -17,6 +17,7 @@ import (
 	"github.com/armtch-dev/clavis/internal/gitsync"
 	"github.com/armtch-dev/clavis/internal/probe"
 	"github.com/armtch-dev/clavis/internal/profile"
+	"github.com/armtch-dev/clavis/internal/script"
 	"github.com/armtch-dev/clavis/internal/sshx"
 	"github.com/armtch-dev/clavis/internal/theme"
 	"github.com/armtch-dev/clavis/internal/vault"
@@ -31,6 +32,7 @@ const (
 	scrWizard
 	scrConfirmDelete
 	scrSettings
+	scrScripts // pick/edit a script to run on the selected host
 )
 
 const (
@@ -56,10 +58,11 @@ const (
 
 // Model is the root bubbletea model.
 type Model struct {
-	cfgDir string
-	cfg    *config.Config
-	store  *profile.Store
-	vault  *vault.Vault
+	cfgDir  string
+	cfg     *config.Config
+	store   *profile.Store
+	scripts *script.Store
+	vault   *vault.Vault
 
 	screen  screen
 	help    bool
@@ -86,11 +89,12 @@ type Model struct {
 	statuses map[string]probe.Status
 
 	// sub-screens
-	unlock   unlockModel
-	firstRun keyBannerModel
-	wizard   *wizardModel
-	confirm  confirmModel
-	settings *settingsModel
+	unlock    unlockModel
+	firstRun  keyBannerModel
+	wizard    *wizardModel
+	confirm   confirmModel
+	settings  *settingsModel
+	scriptsUI *scriptsModel
 
 	statusMsg   string
 	statusType  statusKind
@@ -104,11 +108,12 @@ type Model struct {
 
 // New builds the root model. identity is non-empty only right after a
 // first-run vault init (so the key banner can be shown once).
-func New(cfgDir string, cfg *config.Config, store *profile.Store, v *vault.Vault, freshIdentity string) *Model {
+func New(cfgDir string, cfg *config.Config, store *profile.Store, scripts *script.Store, v *vault.Vault, freshIdentity string) *Model {
 	m := &Model{
 		cfgDir:   cfgDir,
 		cfg:      cfg,
 		store:    store,
+		scripts:  scripts,
 		vault:    v,
 		testing:  map[string]bool{},
 		statuses: map[string]probe.Status{},
@@ -188,9 +193,11 @@ type sessionDoneMsg struct {
 
 // pendingConnect stashes the profile and decrypted credentials between the
 // preflight starting and the terminal handover, so they aren't re-derived.
+// A non-nil script turns the handover into a script run instead of a shell.
 type pendingConnect struct {
-	p     profile.Profile
-	creds sshx.Credentials
+	p      profile.Profile
+	creds  sshx.Credentials
+	script *runScript
 }
 
 type preflightMsg struct {
@@ -285,6 +292,16 @@ func (m *Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case preflightMsg:
 		return m.applyPreflight(msg)
 
+	case scriptDoneMsg:
+		m.monitor.Suspend(msg.profileID, false)
+		m.pinHostKey(msg.profileID, msg.hostKeyFP, msg.hostKeyLine)
+		if msg.ok {
+			m.setStatus(statusOK, msg.summary)
+		} else {
+			m.setStatus(statusErr, msg.summary)
+		}
+		return m, nil
+
 	case sessionDoneMsg:
 		m.monitor.Suspend(msg.profileID, false)
 		m.pinHostKey(msg.profileID, msg.hostKeyFP, msg.hostKeyLine)
@@ -317,6 +334,8 @@ func (m *Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateConfirm(msg)
 	case scrSettings:
 		return m.updateSettings(msg)
+	case scrScripts:
+		return m.updateScripts(msg)
 	default:
 		return m.updateList(msg)
 	}
@@ -447,8 +466,11 @@ func (m *Model) applyPreflight(msg preflightMsg) (tea.Model, tea.Cmd) {
 }
 
 // handoverCmd gives the terminal to a real SSH session; probing for the host
-// stays suspended until sessionDoneMsg.
+// stays suspended until sessionDoneMsg (or scriptDoneMsg for script runs).
 func (m *Model) handoverCmd(pc pendingConnect) tea.Cmd {
+	if pc.script != nil {
+		return m.scriptSessionCmd(pc)
+	}
 	p := pc.p
 	if p.HasAuth(profile.AuthKey) {
 		cmd, tail, cleanup, err := sshx.ExternalCommand(p, pc.creds.PrivateKey)
@@ -576,6 +598,8 @@ func (m *Model) View() string {
 		body = m.confirm.view(m.width, bodyH)
 	case scrSettings:
 		body = m.settings.view(m.width, bodyH)
+	case scrScripts:
+		body = m.scriptsUI.view(m.width, bodyH)
 	default:
 		body = m.viewList()
 	}
@@ -637,9 +661,9 @@ func (m *Model) legend(avail int) string {
 		return hintKeys([][2]string{{"enter", "apply"}, {"esc", "clear"}})
 	}
 	tiers := [][][2]string{
-		{{"enter", "connect"}, {"a", "add"}, {"e", "edit"}, {"d", "delete"}, {"t", "test"},
+		{{"enter", "connect"}, {"r", "run script"}, {"a", "add"}, {"e", "edit"}, {"d", "delete"}, {"t", "test"},
 			{"s", "sync"}, {"g", "settings"}, {"i", "import"}, {"o", "sort"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
-		{{"enter", "connect"}, {"a", "add"}, {"e", "edit"}, {"d", "delete"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
+		{{"enter", "connect"}, {"r", "run"}, {"a", "add"}, {"e", "edit"}, {"d", "delete"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
 		{{"enter", "connect"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
 		{{"?", "help"}, {"q", "quit"}},
 	}

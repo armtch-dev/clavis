@@ -13,6 +13,7 @@ import (
 	"github.com/armtch-dev/clavis/internal/cli"
 	"github.com/armtch-dev/clavis/internal/config"
 	"github.com/armtch-dev/clavis/internal/profile"
+	"github.com/armtch-dev/clavis/internal/script"
 	"github.com/armtch-dev/clavis/internal/theme"
 	"github.com/armtch-dev/clavis/internal/tui"
 	"github.com/armtch-dev/clavis/internal/vault"
@@ -105,6 +106,10 @@ func buildModel(cfgDir string) (*tui.Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	scripts, err := script.LoadStore(cfgDir)
+	if err != nil {
+		return nil, err
+	}
 	freshIdentity := ""
 	v, err := vault.Load(cfgDir)
 	if err == vault.ErrNotInited {
@@ -113,7 +118,7 @@ func buildModel(cfgDir string) (*tui.Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	return tui.New(cfgDir, cfg, store, v, freshIdentity), nil
+	return tui.New(cfgDir, cfg, store, scripts, v, freshIdentity), nil
 }
 
 // dumpFrame renders a single 100x30 frame to stdout and exits — a debug hook

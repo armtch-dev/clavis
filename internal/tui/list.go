@@ -182,6 +182,11 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "i":
 		m.importSSHConfig()
 		return m, m.saveAll("import from ssh_config")
+	case "r":
+		if p := m.selected(vis); p != nil && m.connecting == "" {
+			m.scriptsUI = newScripts(m, p)
+			m.screen = scrScripts
+		}
 	case "enter":
 		if p := m.selected(vis); p != nil && m.connecting == "" {
 			return m, m.startConnect(*p)
@@ -855,6 +860,7 @@ func (m *Model) viewHelp() string {
 	dw := pw - 6
 	rows := [][2]string{
 		{"enter", "connect to the selected host"},
+		{"r", "run a saved or pasted script on the selected host"},
 		{"a", "add a profile (step-by-step wizard)"},
 		{"e", "edit the selected profile"},
 		{"d", "delete the selected profile and its vault secrets"},
