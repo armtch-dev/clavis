@@ -121,10 +121,11 @@ func buildModel(cfgDir string) (*tui.Model, error) {
 	return tui.New(cfgDir, cfg, store, scripts, v, freshIdentity), nil
 }
 
-// dumpFrame renders a single 100x30 frame to stdout and exits — a debug hook
-// so agents/tests can eyeball layout without a live TTY. It refuses to run
-// on an uninitialized config dir: it must never mint a master key and print
-// it into a log.
+// dumpFrame renders a single frame to stdout and exits — a debug hook so
+// agents/tests can eyeball layout without a live TTY. The render size
+// defaults to 100x30 and can be overridden with CLAVIS_DUMP_SIZE="WxH".
+// It refuses to run on an uninitialized config dir: it must never mint a
+// master key and print it into a log.
 func dumpFrame(cfgDir string) error {
 	if _, err := vault.Load(cfgDir); err != nil {
 		return fmt.Errorf("--dump-frame needs an initialized vault (run clavis interactively first): %w", err)
@@ -134,7 +135,13 @@ func dumpFrame(cfgDir string) error {
 		return err
 	}
 	defer m.Close()
-	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	w, h := 100, 30
+	if s := os.Getenv("CLAVIS_DUMP_SIZE"); s != "" {
+		if _, err := fmt.Sscanf(s, "%dx%d", &w, &h); err != nil {
+			return fmt.Errorf("CLAVIS_DUMP_SIZE must look like 100x30: %w", err)
+		}
+	}
+	m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	// Optional: replay a comma-separated key sequence to preview deeper
 	// screens (e.g. CLAVIS_DUMP_KEYS="a,n,y,p").
 	if seq := os.Getenv("CLAVIS_DUMP_KEYS"); seq != "" {

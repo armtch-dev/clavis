@@ -10,7 +10,7 @@ import (
 )
 
 // "c" opens an inline prompt that sets the selected host's category without
-// the wizard, persists it, and category-sort groups by it (not by tags).
+// the wizard, persists it, and the always-on grouping uses it (not tags).
 func TestInlineCategoryPromptAndGrouping(t *testing.T) {
 	m := newTestModel(t)
 	m.screen = scrList
@@ -39,13 +39,12 @@ func TestInlineCategoryPromptAndGrouping(t *testing.T) {
 		t.Error("category not persisted to profiles.json")
 	}
 
-	// Grouping uses the category, not the tag.
-	m.sortMode = sortCategory
+	// Grouping is always on and uses the category, not the tag.
 	out := m.View()
-	if !strings.Contains(out, "— local —") {
+	if !strings.Contains(out, "local · 1 host") {
 		t.Error("category heading missing")
 	}
-	if strings.Contains(out, "— prod —") {
+	if strings.Contains(out, "prod · ") {
 		t.Error("grouped by tag, not category")
 	}
 

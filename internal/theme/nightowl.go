@@ -71,6 +71,11 @@ var (
 	CardBg = lipgloss.Color(BlendHex(HexBg, HexWhite, 0.045))
 	Faint  = lipgloss.Color(BlendHex(HexBorder, HexBg, 0.45))
 
+	// Surface is the fixed-chrome tint (header bar, footer legend): a step
+	// above CardBg — 7% toward white — so the bars read as anchored chrome
+	// without competing with the SelBg selection fill.
+	Surface = lipgloss.Color(BlendHex(HexBg, HexWhite, 0.07))
+
 	// Subtle sits between Fg and Muted: secondary *data* (host column, dates,
 	// header meta) — a step brighter than Muted, which is reserved for chrome
 	// (icons, group headings). Keeps real data from blending into decoration.
@@ -111,6 +116,7 @@ func Init() {
 // against the given background hex.
 func rebase(bgHex string) {
 	CardBg = lipgloss.Color(BlendHex(bgHex, HexWhite, 0.045))
+	Surface = lipgloss.Color(BlendHex(bgHex, HexWhite, 0.07))
 	Faint = lipgloss.Color(BlendHex(HexBorder, bgHex, 0.45))
 	Subtle = lipgloss.Color(BlendHex(HexFg, bgHex, 0.45))
 	SparkDim = lipgloss.Color(BlendHex(HexMuted, bgHex, 0.40))

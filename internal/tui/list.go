@@ -17,25 +17,21 @@ import (
 	"github.com/armtch-dev/clavis/internal/theme"
 )
 
-// sortMode cycles on "o": stored order, latency (fastest reachable first),
-// or grouped by category.
+// sortMode toggles on "o": within each category group, hosts follow either
+// their stored order or latency (fastest reachable first). Category grouping
+// itself is always active — it is not a sort mode.
 type sortMode int
 
 const (
 	sortDefault sortMode = iota
 	sortLatency
-	sortCategory
 )
 
 func (s sortMode) String() string {
-	switch s {
-	case sortLatency:
+	if s == sortLatency {
 		return "latency"
-	case sortCategory:
-		return "categories"
-	default:
-		return "default order"
 	}
+	return "default order"
 }
 
 // visible returns the filtered profile list (case-insensitive substring on
@@ -56,53 +52,49 @@ func (m *Model) visible() []profile.Profile {
 	return m.sortProfiles(base)
 }
 
-// sortProfiles reorders a copy of in according to m.sortMode; the stored
-// order is left untouched.
+// sortProfiles reorders a copy of in: always grouped by category first
+// (case-insensitive alphabetical, uncategorized sinks to the bottom), then
+// within each group by stored order (sortDefault) or by latency rank
+// (sortLatency: reachable fastest first, then unknown, then down). The
+// stored order is left untouched.
 func (m *Model) sortProfiles(in []profile.Profile) []profile.Profile {
-	if m.sortMode == sortDefault || len(in) < 2 {
+	if len(in) < 2 {
 		return in
 	}
 	out := append([]profile.Profile(nil), in...)
-	switch m.sortMode {
-	case sortLatency:
-		// Reachable fastest first, then unknown, then down.
-		rank := func(p profile.Profile) (int, float64) {
-			st, ok := m.statuses[p.ID]
-			switch {
-			case ok && st.Reachable:
-				return 0, st.LatencyMs
-			case !ok:
-				return 1, 0
-			default:
-				return 2, 0
-			}
+	rank := func(p profile.Profile) (int, float64) {
+		st, ok := m.statuses[p.ID]
+		switch {
+		case ok && st.Reachable:
+			return 0, st.LatencyMs
+		case !ok:
+			return 1, 0
+		default:
+			return 2, 0
 		}
-		sort.SliceStable(out, func(i, j int) bool {
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		ci, cj := out[i].Category != "", out[j].Category != ""
+		if ci != cj {
+			return ci // categorized before uncategorized
+		}
+		if gi, gj := strings.ToLower(out[i].Category), strings.ToLower(out[j].Category); gi != gj {
+			return gi < gj
+		}
+		if m.sortMode == sortLatency {
 			ri, li := rank(out[i])
 			rj, lj := rank(out[j])
 			if ri != rj {
 				return ri < rj
 			}
 			return li < lj
-		})
-	case sortCategory:
-		// Grouped by category alphabetically (case-insensitive);
-		// uncategorized sinks to the bottom.
-		sort.SliceStable(out, func(i, j int) bool {
-			ci, cj := out[i].Category != "", out[j].Category != ""
-			if ci != cj {
-				return ci
-			}
-			if !ci {
-				return false
-			}
-			return strings.ToLower(out[i].Category) < strings.ToLower(out[j].Category)
-		})
-	}
+		}
+		return false // stable sort keeps the stored order within the group
+	})
 	return out
 }
 
-// groupCategory names the group a profile belongs to in sortCategory mode.
+// groupCategory names the category group a profile belongs to.
 func groupCategory(p profile.Profile) string {
 	if p.Category == "" {
 		return "uncategorized"
@@ -187,7 +179,11 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.catTarget, m.catInput = p.ID, p.Category
 		}
 	case "o":
-		m.sortMode = (m.sortMode + 1) % 3
+		if m.sortMode == sortDefault {
+			m.sortMode = sortLatency
+		} else {
+			m.sortMode = sortDefault
+		}
 		m.clampCursor()
 		m.setStatus(statusInfo, "sort: "+m.sortMode.String())
 	case "?":
@@ -369,9 +365,25 @@ func (m *Model) layoutList() listLayout {
 	}
 	l.nameW = clamp(l.listW/5, 14, 28)
 	l.endW = clamp(l.listW/4+4, 20, 38)
-	l.sparkW = 12
+	l.sparkW = 16
 	if l.listW >= 110 {
-		l.sparkW = 16
+		l.sparkW = 20
+	}
+	// The fixed columns must fit the row budget (rowW-1, the clip applied in
+	// renderRow) or every row gets chopped mid-auth-cell with a stray "…".
+	// Give the overflow back from the host column — the widest, and the one
+	// that truncates most gracefully.
+	gaps := 4
+	fixed := 1 + 6 + l.nameW + l.endW + 5 // dot, ping, name, host, auth
+	if l.showSpark {
+		gaps++
+		fixed += l.sparkW
+	}
+	fixed += gaps * len(l.gap)
+	if over := fixed - (max(l.listW-l.pad, 20) - 1); over > 0 {
+		d := min(over, l.endW-14)
+		l.endW -= d
+		l.nameW = max(l.nameW-(over-d), 10)
 	}
 	return l
 }
@@ -455,10 +467,11 @@ func (m *Model) viewList() string {
 		lipgloss.Width(left)+lipgloss.Width(strings.Join(meta, sep)+pad)+1 > l.width {
 		meta = meta[1:]
 	}
+	// The tinted bar is the header's frame — no divider underneath, the line
+	// is reclaimed for the row region.
 	header := spread(left, strings.Join(meta, sep)+pad, l.width)
-	b.WriteString(ansi.Truncate(header, l.width, "") + "\n")
-	b.WriteString(theme.Divider(l.width) + "\n")
-	headerH := 2
+	b.WriteString(chromeFill(header, l.width) + "\n")
+	headerH := 1
 	if l.roomy {
 		b.WriteString("\n")
 		headerH++
@@ -479,33 +492,95 @@ func (m *Model) viewList() string {
 		return b.String()
 	}
 
-	region := m.renderRowRegion(vis, l, avail)
+	region := strings.TrimRight(m.renderRowRegion(vis, l, avail), "\n")
+	// Fleet summary strip: ambient totals anchored to the bottom of the
+	// content area, rendered only when at least 3 spare lines remain (a
+	// breathing line + hairline + summary) so tight frames never pay for it.
+	strip := m.fleetSummary(l)
+	showStrip := strip != "" && avail-lipgloss.Height(region) >= 3
+	contentH := avail
+	if showStrip {
+		contentH = avail - 2 // hairline + summary live in the reclaimed rows
+	}
+	var content string
 	if l.showDetail {
-		left := lipgloss.NewStyle().Width(l.listW).MaxHeight(max(avail, 1)).Render(region)
-		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderDetail(m.selected(vis), l, avail)))
+		left := lipgloss.NewStyle().Width(l.listW).MaxHeight(max(contentH, 1)).Render(region)
+		content = lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderDetail(m.selected(vis), l, contentH))
 	} else {
-		b.WriteString(region)
+		content = region
+	}
+	b.WriteString(content)
+	if showStrip {
+		gap := contentH - lipgloss.Height(content) // pad so the strip hugs the footer
+		b.WriteString(strings.Repeat("\n", max(gap, 0)+1))
+		b.WriteString(theme.Divider(l.width) + "\n")
+		b.WriteString(strip)
 	}
 	return b.String()
 }
 
+// fleetSummary builds the one-line ambient fleet strip: up/down totals, the
+// average latency over reachable hosts, and the sync remote. Segments that
+// don't apply are omitted; an empty result suppresses the strip entirely.
+// Deliberately quiet — dimmed status dots, muted text.
+func (m *Model) fleetSummary(l listLayout) string {
+	up, down := 0, 0
+	var sum float64
+	for _, p := range m.store.Profiles {
+		st, ok := m.statuses[p.ID]
+		if !ok {
+			continue
+		}
+		if st.Reachable {
+			up++
+			sum += st.LatencyMs
+		} else {
+			down++
+		}
+	}
+	var counts []string
+	if up > 0 {
+		counts = append(counts, fleetUpDot.Render(theme.IconUp)+theme.Dim.Render(fmt.Sprintf(" %d up", up)))
+	}
+	if down > 0 {
+		counts = append(counts, fleetDownDot.Render(theme.IconDown)+theme.Dim.Render(fmt.Sprintf(" %d down", down)))
+	}
+	var segs []string
+	if len(counts) > 0 {
+		segs = append(segs, strings.Join(counts, theme.Dim.Render(" · ")))
+	}
+	if up > 0 {
+		segs = append(segs, theme.Dim.Render("avg ")+theme.Sub.Render(fmt.Sprintf("%.0fms", sum/float64(up))))
+	}
+	if m.cfg.Sync.Remote != "" {
+		segs = append(segs, theme.Dim.Render(theme.IconSync+" "+shortRemote(m.cfg.Sync.Remote)))
+	}
+	if len(segs) == 0 {
+		return ""
+	}
+	line := strings.Repeat(" ", l.pad) + strings.Join(segs, "    ")
+	return ansi.Truncate(line, l.width, "")
+}
+
+// Status dots for the fleet strip, pulled toward the background so the strip
+// stays ambient rather than echoing the full-brightness row indicators.
+var (
+	fleetUpDot = lipgloss.NewStyle().
+			Foreground(lipgloss.Color(theme.BlendHex(theme.HexGreen, theme.HexBg, 0.35)))
+	fleetDownDot = lipgloss.NewStyle().
+			Foreground(lipgloss.Color(theme.BlendHex(theme.HexRed, theme.HexBg, 0.35)))
+)
+
 // listEntry is one display line of the row region: either a profile row
-// (idx into vis) or, in tag-grouped mode, a muted group heading.
+// (idx into vis) or a category group heading.
 type listEntry struct {
 	heading string // non-empty for a group heading line
 	idx     int
 }
 
 // listEntries expands vis into display lines, inserting a heading before
-// each category when sortCategory is active.
+// each category group (grouping is always active).
 func (m *Model) listEntries(vis []profile.Profile) []listEntry {
-	if m.sortMode != sortCategory {
-		out := make([]listEntry, len(vis))
-		for i := range vis {
-			out[i] = listEntry{idx: i}
-		}
-		return out
-	}
 	out := make([]listEntry, 0, len(vis)+4)
 	prev := ""
 	for i, p := range vis {
@@ -547,12 +622,11 @@ func (m *Model) renderRowRegion(vis []profile.Profile, l listLayout, avail int) 
 		start = cursorEnt - rows + 1
 	}
 	end := min(start+rows, len(entries))
-	lead := strings.Repeat(" ", max(l.pad-1, 0))
 	first, last := -1, -1
 	for i := start; i < end; i++ {
 		e := entries[i]
 		if e.heading != "" {
-			b.WriteString(lead + "  " + theme.Hint.Render("— "+e.heading+" —") + "\n")
+			b.WriteString(m.groupHeading(e.heading, vis, l) + "\n")
 			continue
 		}
 		if first < 0 {
@@ -568,110 +642,66 @@ func (m *Model) renderRowRegion(vis []profile.Profile, l listLayout, avail int) 
 	return b.String()
 }
 
-// renderDetail draws the right-hand side panel for the selected profile on
-// very wide terminals: a matte pane separated by a thin left hairline,
-// sharing the row region's vertical space exactly.
-func (m *Model) renderDetail(p *profile.Profile, l listLayout, avail int) string {
-	avail = max(avail, 1)
-	pane := lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(theme.Border).
-		Padding(0, 2).
-		Width(l.detailW).
-		Height(avail).
-		MaxHeight(avail)
-	cw := l.detailW - 4 // content width inside the padding
-	if p == nil {
-		return pane.Render(theme.Hint.Render("no profile selected"))
+// groupHeading renders a category section header as a full-width rule that
+// carries data: `─ cloud · 2 hosts · 2 up ───────`, the dashes filling the
+// remaining row width exactly. Counts come from the group's visible rows.
+func (m *Model) groupHeading(name string, vis []profile.Profile, l listLayout) string {
+	total, up, down := 0, 0, 0
+	for _, p := range vis {
+		if groupCategory(p) != name {
+			continue
+		}
+		total++
+		if st, ok := m.statuses[p.ID]; ok {
+			if st.Reachable {
+				up++
+			} else {
+				down++
+			}
+		}
+	}
+	hosts := fmt.Sprintf("%d host", total)
+	if total != 1 {
+		hosts += "s"
+	}
+	upSeg, downSeg := "", ""
+	if up > 0 {
+		upSeg = fmt.Sprintf("%d up", up)
+	}
+	if down > 0 {
+		downSeg = fmt.Sprintf("%d down", down)
 	}
 
-	label := func(s string) string { return theme.Label.Width(6).Render(s) }
+	lead := strings.Repeat(" ", max(l.pad-1, 0))
+	budget := max(l.listW-len(lead)-1, 10)
+
+	// Plain widths first so the dash fill lands exactly on the budget.
+	sep := " · "
+	plainW := lipgloss.Width(sep + hosts)
+	if upSeg != "" {
+		plainW += lipgloss.Width(sep + upSeg)
+	}
+	if downSeg != "" {
+		plainW += lipgloss.Width(sep + downSeg)
+	}
+	name = truncTo(name, max(budget-plainW-6, 4)) // 6: rule prefix + min tail
+	fill := budget - 2 - lipgloss.Width(name) - plainW - 1
+
 	var b strings.Builder
-	b.WriteString(theme.Accent.Render(truncTo(p.Name, cw)) + "\n")
-	target := fmt.Sprintf("%s@%s:%d", p.User, p.Host, p.Port)
-	b.WriteString(theme.Value.Render(truncTo(target, cw)) + "\n")
-	b.WriteString(theme.Divider(cw) + "\n")
-
-	var auth []string
-	if p.HasAuth(profile.AuthKey) {
-		auth = append(auth, theme.IconKey+" key")
+	b.WriteString(lead + theme.Hint.Render("─ "))
+	b.WriteString(theme.Sub.Render(name))
+	b.WriteString(theme.Dim.Render(sep + hosts))
+	if upSeg != "" {
+		b.WriteString(theme.Dim.Render(sep) + theme.StatusOK.Render(upSeg))
 	}
-	if p.HasAuth(profile.AuthPassword) {
-		auth = append(auth, "password")
+	if downSeg != "" {
+		b.WriteString(theme.Dim.Render(sep) + theme.StatusErr.Render(downSeg))
 	}
-	if len(auth) == 0 {
-		auth = append(auth, "none")
+	if fill > 0 {
+		b.WriteString(theme.Hint.Render(" " + strings.Repeat("─", fill)))
 	}
-	b.WriteString(label("auth") + theme.Value.Render(strings.Join(auth, "  ")) + "\n")
-	if p.Category != "" {
-		b.WriteString(label("group") + theme.Value.Render(truncTo(p.Category, cw-6)) + "\n")
-	}
-	if len(p.Tags) > 0 {
-		b.WriteString(label("tags") + theme.Tag.Render(truncTo("#"+strings.Join(p.Tags, " #"), cw-6)) + "\n")
-	}
-	if p.ProxyJump != "" {
-		b.WriteString(label("jump") + theme.Value.Render(truncTo(p.ProxyJump, cw-6)) + "\n")
-	}
-
-	st, have := m.statuses[p.ID]
-	state := theme.Dim.Render(theme.IconIdle + " unknown")
-	switch {
-	case have && st.Reachable:
-		up := lipgloss.NewStyle().Foreground(theme.LatencyColor(st.LatencyMs))
-		state = up.Render(fmt.Sprintf("%s up · %.0fms", theme.IconUp, st.LatencyMs))
-	case have:
-		down := theme.IconDown + " down"
-		if !st.LastSeen.IsZero() {
-			down += " · ↓ " + relDur(time.Since(st.LastSeen))
-		}
-		state = lipgloss.NewStyle().Foreground(theme.Red).Render(down)
-	}
-	b.WriteString(label("state") + state + "\n")
-
-	// "seen" only matters for a down host — for an up host it is just "now".
-	if have && !st.Reachable {
-		seen := theme.Hint.Render("never")
-		if !st.LastSeen.IsZero() {
-			seen = theme.Value.Render(st.LastSeen.Format("Jan 2 15:04"))
-		}
-		b.WriteString(label("seen") + seen + "\n")
-	}
-
-	// Latency spread over the probe history, ignoring failed (-1) samples.
-	var lo, hi, sum float64
-	n := 0
-	if have {
-		for _, v := range st.History {
-			if v < 0 {
-				continue
-			}
-			if n == 0 || v < lo {
-				lo = v
-			}
-			if v > hi {
-				hi = v
-			}
-			sum += v
-			n++
-		}
-	}
-	ping := theme.Hint.Render("–")
-	if n > 0 {
-		vals := fmt.Sprintf("%.0f / %.0f / %.0f ms", lo, sum/float64(n), hi)
-		ping = theme.Value.Render(vals)
-		// Three bare numbers force the reader to guess the convention.
-		if legend := "  min·avg·max"; len(vals)+len(legend)+6 <= cw {
-			ping += theme.Hint.Render(legend)
-		}
-	}
-	b.WriteString(label("ping") + ping + "\n")
-
-	// Middle-ellipsized to one line: people verify fingerprints by comparing
-	// the start and the end, never the middle.
-	if p.HostKeyFP != "" {
-		b.WriteString(label("key") + theme.Dim.Render(midTrunc(p.HostKeyFP, cw-6)) + "\n")
-	}
-	return pane.Render(strings.TrimRight(b.String(), "\n"))
+	// Safety net: the width invariant is load-bearing (overflow wraps the frame).
+	return ansi.Truncate(b.String(), l.listW-1, "")
 }
 
 // truncTo shortens s to at most w runes with an ellipsis.
@@ -793,28 +823,42 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 	}
 	cells = append(cells, theme.Chip.Width(5).Render(strings.Join(auth, " ")))
 
+	lead := strings.Repeat(" ", max(l.pad-1, 0))
+	rowW := max(l.listW-l.pad, 20)
+
 	trailing := ""
-	if l.showTags && len(p.Tags) > 0 {
-		trailing = theme.Tag.Render("#" + strings.Join(p.Tags, " #"))
-	}
-	if m.testing[p.ID] {
+	switch {
+	case m.testing[p.ID]:
 		trailing = m.spin.View() + theme.Accent.Render(" testing")
-	}
-	if m.connecting == p.ID {
+	case m.connecting == p.ID:
 		trailing = m.spin.View() + theme.Accent.Render(" connecting")
+	case l.showTags && len(p.Tags) > 0:
+		// Tags are garnish: only append them when enough of the row budget
+		// remains for them to be legible — a clipped "#clou…" stub is noise.
+		remain := rowW - 1 - lipgloss.Width(strings.Join(cells, l.gap)) - len(l.gap)
+		if remain >= 10 {
+			trailing = theme.Tag.Render(truncTo("#"+strings.Join(p.Tags, " #"), remain))
+		}
 	}
 	if trailing != "" {
 		cells = append(cells, trailing)
 	}
 
 	line := strings.Join(cells, l.gap)
-	lead := strings.Repeat(" ", max(l.pad-1, 0))
-	rowW := max(l.listW-l.pad, 20)
 	// Clip to the row budget: lipgloss.Width wraps overflow onto a second
-	// line, which tears the selection highlight on narrow terminals.
-	line = ansi.Truncate(line, rowW-1, "…")
+	// line, which tears the selection highlight on narrow terminals. The "…"
+	// marker only appears when real content is clipped — losing nothing but a
+	// cell's trailing pad spaces shouldn't stamp an ellipsis on every row.
+	if lipgloss.Width(line) > rowW-1 {
+		tail := ""
+		if plain := []rune(ansi.Strip(line)); rowW-1 < len(plain) &&
+			strings.TrimSpace(string(plain[rowW-1:])) != "" {
+			tail = "…"
+		}
+		line = ansi.Truncate(line, rowW-1, tail)
+	}
 	if selected {
-		return lead + theme.SelTick.Render(theme.IconPointer) + selFill(" "+line, rowW)
+		return lead + theme.Accent.Render("▎") + selFill(" "+line, rowW)
 	}
 	return lead + "  " + line
 }
@@ -826,12 +870,26 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 // background sequence is re-opened after each reset, keeping the per-cell
 // colours (green dot, blue tags) on top of the fill.
 func selFill(line string, width int) string {
+	return bgFill(line, width, theme.SelBg)
+}
+
+// chromeFill tints the fixed chrome bars (header, footer legend) with the
+// theme surface colour, exactly `width` cells wide — same reset-survival
+// mechanics as selFill.
+func chromeFill(line string, width int) string {
+	return bgFill(line, width, theme.Surface)
+}
+
+// bgFill clips/pads line to exactly width cells and paints bg underneath,
+// re-opening the background SGR after every per-cell reset (see selFill).
+func bgFill(line string, width int, bg lipgloss.Color) string {
+	line = ansi.Truncate(line, width, "")
 	if pad := width - lipgloss.Width(line); pad > 0 {
 		line += strings.Repeat(" ", pad)
 	}
 	// Derive the bg sequence for the active colour profile from a probe
 	// render, rather than hardcoding a truecolour escape.
-	marker := lipgloss.NewStyle().Background(theme.SelBg).Render("|")
+	marker := lipgloss.NewStyle().Background(bg).Render("|")
 	i := strings.Index(marker, "|")
 	if i <= 0 {
 		return line // colourless profile: nothing to paint
@@ -853,34 +911,42 @@ func spread(left, right string, width int) string {
 // Capped at ▆ so adjacent rows can never fuse into a solid slab.
 var sparkBlocks = []rune("▁▂▃▄▅▆")
 
-// sparkline renders the last n latency samples as a near-background texture;
-// failures show as a dim ╵. Only the newest sample takes the latency colour,
-// tying the trend to the ping dot without reintroducing a heat ramp.
+// sparkFail marks a failed probe sample: red pulled toward the background so
+// a bad patch reads as a scar in the trend, not a full-brightness siren.
+var sparkFail = lipgloss.NewStyle().
+	Foreground(lipgloss.Color(theme.BlendHex(theme.HexRed, theme.HexBg, 0.35)))
+
+// sparkline renders the last n latency samples as a gradient trend: every
+// sample takes its own latency-band colour (green → yellow → red), failures
+// show as a dim red ╳. With fewer than 3 valid samples a lone block would
+// read as data where there is none — render a dim ⋯ placeholder instead.
 func sparkline(hist []float64, n int) string {
 	if len(hist) > n {
 		hist = hist[len(hist)-n:]
 	}
-	var maxV float64
+	valid, maxV := 0, 0.0
 	for _, v := range hist {
-		if v > maxV {
-			maxV = v
+		if v >= 0 {
+			valid++
+			if v > maxV {
+				maxV = v
+			}
 		}
 	}
+	if valid < 3 {
+		return theme.Dim.Render("⋯") + strings.Repeat(" ", max(n-1, 0))
+	}
 	var b strings.Builder
-	for i, v := range hist {
+	for _, v := range hist {
 		if v < 0 {
-			b.WriteString(theme.Dim.Render("╵"))
+			b.WriteString(sparkFail.Render("╳"))
 			continue
 		}
 		idx := 0
 		if maxV > 0 {
 			idx = int(v / maxV * float64(len(sparkBlocks)-1))
 		}
-		style := theme.Spark
-		if i == len(hist)-1 {
-			style = lipgloss.NewStyle().Foreground(theme.LatencyColor(v))
-		}
-		b.WriteString(style.Render(string(sparkBlocks[idx])))
+		b.WriteString(lipgloss.NewStyle().Foreground(theme.LatencyColor(v)).Render(string(sparkBlocks[idx])))
 	}
 	for i := len(hist); i < n; i++ {
 		b.WriteString(" ")
@@ -915,7 +981,7 @@ func (m *Model) viewHelp() string {
 		{"g", "settings — GitHub token, repo, autosync, keychain"},
 		{"i", "import hosts from ~/.ssh/config"},
 		{"c", "set the selected host's category (list grouping)"},
-		{"o", "cycle sort: stored order / latency / categories"},
+		{"o", "toggle latency ordering within groups"},
 		{"/", "filter profiles"},
 		{"j k ↑ ↓", "move"},
 		{"q", "quit"},

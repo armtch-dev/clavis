@@ -60,7 +60,7 @@ The main interface is a list of SSH profiles. Keybindings:
 | `g` | Settings: GitHub token, repo, autosync, keychain |
 | `i` | Import hosts from ~/.ssh/config |
 | `c` | Set the selected host's category (inline, no wizard) |
-| `o` | Cycle sort: stored order / latency / categories |
+| `o` | Toggle latency ordering within category groups |
 | `/` | Filter profiles (case-insensitive substring search) |
 | `j/k` or `↑/↓` | Move cursor up/down |
 | `?` | Show help overlay |
@@ -68,9 +68,11 @@ The main interface is a list of SSH profiles. Keybindings:
 
 ### Categories vs tags
 
-Each host has one optional **category** — the bucket it appears under when
-the list is sorted by categories (`o`): think `cloud`, `local`, `work`. Set
-it in the profile wizard or, faster, press `c` on a host and type it inline.
+Each host has one optional **category** — the list is always grouped by it:
+think `cloud`, `local`, `work`. Hosts without a category collect under
+`uncategorized` at the bottom. Set it in the profile wizard or, faster,
+press `c` on a host and type it inline. `o` toggles how hosts are ordered
+*within* each group: stored order, or latency (fastest reachable first).
 
 **Tags** are separate: free-form labels used for filtering (`/`) and for
 matching scripts to hosts. A host has one category but any number of tags.
