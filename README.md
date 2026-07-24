@@ -53,7 +53,7 @@ The main interface is a list of SSH profiles. Keybindings:
 | `enter` | Connect to the selected host |
 | `r` | Run a script on the selected host (pick a saved one, or paste and go) |
 | `a` | Add a profile (step-by-step wizard; paste a private key or point to a file) |
-| `e` | Edit the selected profile |
+| `e` | Edit the selected profile (`enter` keeps any answer or stored credential as-is) |
 | `d` | Delete the selected profile and its vault secrets |
 | `t` | Test the connection (dial → handshake → auth → exec) |
 | `s` | Sync now (guarded, encrypted git push) |
