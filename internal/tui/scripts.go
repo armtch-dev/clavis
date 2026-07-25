@@ -20,12 +20,15 @@ import (
 	"github.com/armtch-dev/clavis/internal/theme"
 )
 
-// scriptsModel is the "run a script" flow for one target host: a picker over
-// the saved scripts, with an inline editor for new/pasted ones. Opened with
-// "r" on the list; running hands the terminal over like a normal connect.
+// scriptsModel is both script screens, told apart by profileID:
+//   - run mode ("r" on a host, profileID set): pick one of the scripts that
+//     apply to that host and run it, or paste something ad hoc. Run-only —
+//     no editing or deleting here.
+//   - manage mode ("m" on the list, profileID empty): the full library —
+//     every script regardless of tags, with create/edit/delete.
 type scriptsModel struct {
 	app                    *Model
-	profileID, profileName string
+	profileID, profileName string // empty in manage mode
 	profileTags            []string
 
 	cursor     int
@@ -51,10 +54,20 @@ func newScripts(app *Model, p *profile.Profile) *scriptsModel {
 	return &scriptsModel{app: app, profileID: p.ID, profileName: p.Name, profileTags: p.Tags}
 }
 
-// applicable is the picker's view of the store: scripts whose tags match the
-// target host (untagged scripts are universal). Tagged scripts only surface
-// on hosts sharing a tag — that's what scopes a script to a set of hosts.
+func newScriptsManager(app *Model) *scriptsModel {
+	return &scriptsModel{app: app}
+}
+
+// manage reports whether this is the library screen (no target host).
+func (s *scriptsModel) manage() bool { return s.profileID == "" }
+
+// applicable is the picker's view of the store. In run mode: only scripts
+// whose tags match the target host (untagged scripts are universal) — that's
+// what scopes a script to a set of hosts. In manage mode: everything.
 func (s *scriptsModel) applicable() []script.Script {
+	if s.manage() {
+		return s.app.scripts.Scripts
+	}
 	var out []script.Script
 	for _, sc := range s.app.scripts.Scripts {
 		if sc.MatchesTags(s.profileTags) {
@@ -154,15 +167,23 @@ func (m *Model) updateScriptPicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n", "p":
 		s.openEditor(nil)
 	case "e":
-		if s.cursor < len(list) {
+		// Editing lives in the manager; the run picker stays run-only.
+		if s.manage() && s.cursor < len(list) {
 			s.openEditor(m.scripts.ByID(list[s.cursor].ID))
 		}
 	case "d":
-		if s.cursor < len(list) {
+		if s.manage() && s.cursor < len(list) {
 			s.confirmDel = true
 		}
 	case "enter":
-		if s.cursor < len(list) && m.connecting == "" {
+		if s.cursor >= len(list) {
+			break
+		}
+		if s.manage() {
+			s.openEditor(m.scripts.ByID(list[s.cursor].ID))
+			break
+		}
+		if m.connecting == "" {
 			sc := list[s.cursor]
 			m.scriptsUI = nil
 			m.screen = scrList
@@ -209,7 +230,11 @@ func (m *Model) updateScriptEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.setStatus(statusOK, "saved script "+sc.Name)
 		return m, m.saveScripts("save script " + sc.Name)
 	case tea.KeyCtrlR:
-		// Run what's in the buffer once, without saving — the paste-and-go path.
+		// Run what's in the buffer once, without saving — the paste-and-go
+		// path. Only meaningful with a target host, i.e. not in the manager.
+		if s.manage() {
+			return m, nil
+		}
 		content := s.area.Value()
 		if strings.TrimSpace(content) == "" {
 			s.errs = "script is empty"
@@ -255,10 +280,16 @@ func (s *scriptsModel) viewPicker(width, height int) string {
 	hidden := len(s.app.scripts.Scripts) - len(list)
 
 	var b strings.Builder
-	title := theme.Title.Render("Run a script") +
-		theme.Dim.Render("  on ") + theme.Accent.Render(s.profileName)
-	if len(s.profileTags) > 0 {
-		title += theme.Tag.Render("  #" + strings.Join(s.profileTags, " #"))
+	var title string
+	if s.manage() {
+		title = theme.Title.Render("Scripts") +
+			theme.Dim.Render(fmt.Sprintf("  %d in the library", len(list)))
+	} else {
+		title = theme.Title.Render("Run a script") +
+			theme.Dim.Render("  on ") + theme.Accent.Render(s.profileName)
+		if len(s.profileTags) > 0 {
+			title += theme.Tag.Render("  #" + strings.Join(s.profileTags, " #"))
+		}
 	}
 	// Long names/tags must clip, not wrap: a wrapped line inside the panel
 	// pushes every line below it down and breaks the height budget.
@@ -266,10 +297,15 @@ func (s *scriptsModel) viewPicker(width, height int) string {
 	b.WriteString("\n\n")
 
 	if len(list) == 0 {
-		if hidden > 0 {
-			b.WriteString(theme.Hint.Render("No scripts match this host's tags. Press ") + theme.Key("n") +
-				theme.Hint.Render(" to write or paste one.") + "\n")
-		} else {
+		switch {
+		case !s.manage() && hidden > 0:
+			b.WriteString(theme.Hint.Render("No scripts apply to this host. Press ") + theme.Key("n") +
+				theme.Hint.Render(" to paste one, or manage tags via ") + theme.Key("m") +
+				theme.Hint.Render(" on the list.") + "\n")
+		case s.manage():
+			b.WriteString(theme.Hint.Render("No scripts yet. Press ") + theme.Key("n") +
+				theme.Hint.Render(" to create one.") + "\n")
+		default:
 			b.WriteString(theme.Hint.Render("No scripts yet. Press ") + theme.Key("n") +
 				theme.Hint.Render(" to write or paste one.") + "\n")
 		}
@@ -297,9 +333,9 @@ func (s *scriptsModel) viewPicker(width, height int) string {
 	if len(list) > maxRows {
 		b.WriteString(theme.Dim.Render(fmt.Sprintf("  %d–%d of %d", start+1, min(start+maxRows, len(list)), len(list))) + "\n")
 	}
-	if hidden > 0 {
+	if !s.manage() && hidden > 0 {
 		b.WriteString(ansi.Truncate(
-			theme.Dim.Render(fmt.Sprintf("  %d script(s) hidden — tags don't match this host", hidden)), cw, "…") + "\n")
+			theme.Dim.Render(fmt.Sprintf("  %d more in the library don't apply to this host", hidden)), cw, "…") + "\n")
 	}
 
 	if s.confirmDel && s.cursor < len(list) {
@@ -308,9 +344,15 @@ func (s *scriptsModel) viewPicker(width, height int) string {
 	}
 
 	b.WriteString("\n" + theme.Divider(cw) + "\n")
-	b.WriteString(fitHints(cw,
-		[][2]string{{"enter", "run"}, {"n", "new/paste"}, {"e", "edit"}, {"d", "delete"}, {"esc", "back"}},
-		[][2]string{{"enter", "run"}, {"n", "new"}, {"e", "edit"}, {"d", "del"}, {"esc", "back"}}))
+	if s.manage() {
+		b.WriteString(fitHints(cw,
+			[][2]string{{"enter", "edit"}, {"n", "new"}, {"d", "delete"}, {"esc", "back"}},
+			[][2]string{{"enter", "edit"}, {"n", "new"}, {"d", "del"}, {"esc", "back"}}))
+	} else {
+		b.WriteString(fitHints(cw,
+			[][2]string{{"enter", "run"}, {"n", "paste & run"}, {"esc", "back"}},
+			[][2]string{{"enter", "run"}, {"n", "paste"}, {"esc", "back"}}))
+	}
 	return center(theme.Panel.Width(inner).Render(b.String()), width, height)
 }
 
@@ -336,8 +378,11 @@ func (s *scriptsModel) viewEditor(width, height int) string {
 	var b strings.Builder
 	// Composed lines clip rather than wrap — a wrap inside the panel breaks
 	// the height budget the textarea was sized against.
-	b.WriteString(ansi.Truncate(theme.Title.Render(title)+
-		theme.Dim.Render("  runs on ")+theme.Accent.Render(s.profileName), cw, "…") + "\n\n")
+	head := theme.Title.Render(title)
+	if !s.manage() {
+		head += theme.Dim.Render("  runs on ") + theme.Accent.Render(s.profileName)
+	}
+	b.WriteString(ansi.Truncate(head, cw, "…") + "\n\n")
 	b.WriteString(theme.Label.Render("name") + "\n" + s.name.View() + "\n\n")
 	b.WriteString(ansi.Truncate(theme.Label.Render("tags")+
 		theme.Hint.Render("  (runs on hosts sharing a tag; empty = any host)"), cw, "…") + "\n" + s.tags.View() + "\n\n")
@@ -347,9 +392,15 @@ func (s *scriptsModel) viewEditor(width, height int) string {
 		b.WriteString("\n\n" + ansi.Truncate(theme.StatusErr.Render("✗ "+s.errs), cw, "…"))
 	}
 	b.WriteString("\n\n" + theme.Divider(cw) + "\n")
-	b.WriteString(fitHints(cw,
-		[][2]string{{"ctrl+r", "run without saving"}, {"ctrl+d", "save"}, {"tab", "next field"}, {"esc", "back"}},
-		[][2]string{{"^r", "run"}, {"^d", "save"}, {"tab", "next"}, {"esc", "back"}}))
+	if s.manage() {
+		b.WriteString(fitHints(cw,
+			[][2]string{{"ctrl+d", "save"}, {"tab", "next field"}, {"esc", "back"}},
+			[][2]string{{"^d", "save"}, {"tab", "next"}, {"esc", "back"}}))
+	} else {
+		b.WriteString(fitHints(cw,
+			[][2]string{{"ctrl+r", "run without saving"}, {"ctrl+d", "save"}, {"tab", "next field"}, {"esc", "back"}},
+			[][2]string{{"^r", "run"}, {"^d", "save"}, {"tab", "next"}, {"esc", "back"}}))
+	}
 	return center(theme.Panel.Width(inner).Render(b.String()), width, height)
 }
 

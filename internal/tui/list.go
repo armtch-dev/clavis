@@ -217,6 +217,9 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scriptsUI = newScripts(m, p)
 			m.screen = scrScripts
 		}
+	case "m":
+		m.scriptsUI = newScriptsManager(m)
+		m.screen = scrScripts
 	case "enter":
 		if p := m.selected(vis); p != nil && m.connecting == "" {
 			return m, m.startConnect(*p)
@@ -972,7 +975,8 @@ func (m *Model) viewHelp() string {
 	dw := pw - 6
 	rows := [][2]string{
 		{"enter", "connect to the selected host"},
-		{"r", "run a saved or pasted script on the selected host"},
+		{"r", "run a script on the selected host (only ones that apply)"},
+		{"m", "manage the script library (create, edit, delete)"},
 		{"a", "add a profile (step-by-step wizard)"},
 		{"e", "edit the selected profile"},
 		{"d", "delete the selected profile and its vault secrets"},

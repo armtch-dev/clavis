@@ -162,8 +162,8 @@ func TestPickerFiltersByHostTags(t *testing.T) {
 	if strings.Contains(out, "dev only") {
 		t.Error("tag-mismatched script shown in the picker")
 	}
-	if !strings.Contains(out, "hidden") {
-		t.Error("picker does not mention the hidden script")
+	if !strings.Contains(out, "don't apply to this host") {
+		t.Error("picker does not mention the non-applicable script count")
 	}
 
 	// Cursor row 1 in the filtered list is "prod only" — enter must run it,
@@ -209,8 +209,9 @@ func TestEditorSavesTags(t *testing.T) {
 	}
 }
 
-// Delete asks for a one-key confirmation; any other key cancels.
-func TestPickerDeleteConfirms(t *testing.T) {
+// Delete lives in the manager and asks for a one-key confirmation; any other
+// key cancels. The run picker must not delete (or edit) at all.
+func TestManagerDeleteConfirmsAndRunPickerIsRunOnly(t *testing.T) {
 	m := newTestModel(t)
 	m.screen = scrList
 	m.width, m.height = 100, 30
@@ -219,7 +220,24 @@ func TestPickerDeleteConfirms(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Run picker: d and e are inert.
 	m.dispatch(keyRunes("r"))
+	m.dispatch(keyRunes("d"))
+	m.dispatch(keyRunes("y"))
+	if len(m.scripts.Scripts) != 1 {
+		t.Fatal("run picker deleted a script")
+	}
+	m.dispatch(keyRunes("e"))
+	if m.scriptsUI.editing {
+		t.Fatal("run picker opened the editor via e")
+	}
+	m.dispatch(tea.KeyMsg{Type: tea.KeyEsc})
+
+	// Manager: d needs a y confirmation.
+	m.dispatch(keyRunes("m"))
+	if !m.scriptsUI.manage() {
+		t.Fatal("m did not open the manager")
+	}
 	m.dispatch(keyRunes("d"))
 	m.dispatch(keyRunes("x")) // cancel
 	if len(m.scripts.Scripts) != 1 {
@@ -229,6 +247,54 @@ func TestPickerDeleteConfirms(t *testing.T) {
 	m.dispatch(keyRunes("y"))
 	if len(m.scripts.Scripts) != 0 {
 		t.Error("confirmed delete left the script")
+	}
+}
+
+// The manager lists every script regardless of tags and enter opens the
+// editor (there is no host to run on).
+func TestManagerListsAllAndEnterEdits(t *testing.T) {
+	m := newTestModel(t)
+	m.screen = scrList
+	m.width, m.height = 100, 30
+	p := addPasswordProfile(t, m, "docker-vm")
+	p.Tags = []string{"prod"}
+	for _, sc := range []script.Script{
+		{Name: "anywhere", Content: "uptime"},
+		{Name: "dev only", Content: "make test", Tags: []string{"dev"}},
+	} {
+		if _, err := m.scripts.Add(sc); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Run picker on the prod host must hide "dev only"…
+	m.dispatch(keyRunes("r"))
+	if n := len(m.scriptsUI.applicable()); n != 1 {
+		t.Fatalf("run picker shows %d scripts, want 1", n)
+	}
+	m.dispatch(tea.KeyMsg{Type: tea.KeyEsc})
+
+	// …the manager shows both.
+	m.dispatch(keyRunes("m"))
+	if n := len(m.scriptsUI.applicable()); n != 2 {
+		t.Fatalf("manager shows %d scripts, want 2", n)
+	}
+	out := m.View()
+	if !strings.Contains(out, "anywhere") || !strings.Contains(out, "dev only") {
+		t.Error("manager view missing scripts")
+	}
+
+	_, cmd := m.dispatch(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil || !m.scriptsUI.editing {
+		t.Fatal("enter in the manager should edit, not run")
+	}
+	if m.scriptsUI.editID == "" {
+		t.Error("editor not bound to the selected script")
+	}
+	// ctrl+r is inert in the manager's editor — no host to run on.
+	_, cmd = m.dispatch(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if cmd != nil || m.pending != nil {
+		t.Error("manager editor started a run")
 	}
 }
 
