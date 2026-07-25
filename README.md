@@ -51,7 +51,8 @@ The main interface is a list of SSH profiles. Keybindings:
 | Key | Action |
 | --- | --- |
 | `enter` | Connect to the selected host |
-| `r` | Run a script on the selected host (pick a saved one, or paste and go) |
+| `r` | Run a script on the selected host (only scripts that apply; or paste and go) |
+| `m` | Manage the script library (all scripts: create, edit, delete) |
 | `a` | Add a profile (step-by-step wizard; paste a private key or point to a file) |
 | `e` | Edit the selected profile (`enter` keeps any answer or stored credential as-is) |
 | `d` | Delete the selected profile and its vault secrets |
@@ -79,10 +80,12 @@ matching scripts to hosts. A host has one category but any number of tags.
 
 ### Running scripts
 
-Press `r` on a host to open the script picker. Scripts are reusable snippets
-stored in `scripts.json` (synced with your profiles, never secret material) —
-create one with `n`, or paste something ad hoc and hit `ctrl+r` to run it once
-without saving.
+Press `r` on a host to open the run picker: it lists only the scripts that
+apply to that host, `enter` runs one, and `n` lets you paste something ad hoc
+(`ctrl+r` runs it once without saving). Creating, editing, and deleting live
+in the script library instead — press `m` on the list to see every script
+regardless of tags. Scripts are reusable snippets stored in `scripts.json`
+(synced with your profiles, never secret material).
 
 Scripts can be tagged with the same tags you put on profiles. A tagged script
 only appears in the picker on hosts that share at least one of its tags

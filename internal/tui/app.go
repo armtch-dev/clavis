@@ -674,7 +674,7 @@ func (m *Model) legend(avail int) string {
 		return hintKeys([][2]string{{"enter", "set category"}, {"esc", "cancel"}})
 	}
 	tiers := [][][2]string{
-		{{"enter", "connect"}, {"r", "run script"}, {"a", "add"}, {"e", "edit"}, {"c", "category"}, {"d", "delete"}, {"t", "test"},
+		{{"enter", "connect"}, {"r", "run script"}, {"m", "scripts"}, {"a", "add"}, {"e", "edit"}, {"c", "category"}, {"d", "delete"}, {"t", "test"},
 			{"s", "sync"}, {"g", "settings"}, {"i", "import"}, {"o", "sort"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
 		{{"enter", "connect"}, {"r", "run"}, {"a", "add"}, {"e", "edit"}, {"d", "delete"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
 		{{"enter", "connect"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
