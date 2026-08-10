@@ -87,14 +87,16 @@ func run() error {
 		}
 	}
 
+	// Adapt the palette to the real terminal BEFORE the model is built:
+	// widget constructors (the unlock input, for one) copy theme styles at
+	// construction, so a later rebase would miss them. Must also run before
+	// bubbletea takes over the tty (OSC 11 query).
+	theme.Init()
 	m, err := buildModel(cfgDir)
 	if err != nil {
 		return err
 	}
 	defer m.Close()
-	// Rebase the palette's bg-relative tints onto the terminal's real
-	// background before bubbletea takes over the tty (OSC 11 query).
-	theme.Init()
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
