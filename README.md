@@ -68,6 +68,7 @@ The main interface is a list of SSH profiles. Keybindings:
 | `e` | Edit the selected profile (`enter` keeps any answer or stored credential as-is) |
 | `d` | Delete the selected profile and its vault secrets |
 | `t` | Test the connection (dial → handshake → auth → exec) |
+| `y` | Identities: reusable credentials shared by many hosts |
 | `s` | Sync now (guarded, encrypted git push) |
 | `g` | Settings: GitHub token, repo, autosync, keychain |
 | `i` | Import hosts from ~/.ssh/config |
@@ -77,6 +78,19 @@ The main interface is a list of SSH profiles. Keybindings:
 | `j/k` or `↑/↓` | Move cursor up/down |
 | `?` | Show help overlay |
 | `q` or `ctrl+c` | Quit |
+
+### Identities
+
+An **identity** is a reusable credential set — a username plus a password
+and/or SSH key (with passphrase if the key needs one) — that any number of
+profiles can authenticate with. Create one with `y` → `n` (same wizard as
+profiles, minus the host questions), then in a profile's wizard the
+**Credentials** step offers every identity alongside "this host's own
+credentials". Identity-backed profiles resolve the username and secrets
+live: edit the identity once (`y` → `enter`), and every bound host picks up
+the change. Identity metadata syncs in `identities.json`; its secrets are
+age-encrypted in `vault/` like everything else. Deleting an identity still
+in use is refused until its profiles are rebound.
 
 ### Categories vs tags
 
@@ -131,7 +145,7 @@ Press `g` from the main list to enter settings.
 
 3. **Enable autosync** (optional): Syncs to git after every change. Manual sync is always available via `s`.
 
-What gets synced: `profiles.json` (host metadata), `config.json` (preferences), `vault.meta` (vault version + recipient), and encrypted vault secrets (`vault/*.age`).
+What gets synced: `profiles.json` (host metadata), `identities.json` (identity metadata), `config.json` (preferences), `vault.meta` (vault version + recipient), and encrypted vault secrets (`vault/*.age`).
 
 What never syncs: your master key (never stored by clavis), the GitHub token (stored locally), and anything in `local/`.
 

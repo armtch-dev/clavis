@@ -33,7 +33,8 @@ const (
 	scrWizard
 	scrConfirmDelete
 	scrSettings
-	scrScripts // pick/edit a script to run on the selected host
+	scrScripts    // pick/edit a script to run on the selected host
+	scrIdentities // manage reusable identities
 )
 
 const (
@@ -62,6 +63,7 @@ type Model struct {
 	cfgDir  string
 	cfg     *config.Config
 	store   *profile.Store
+	idents  *profile.IdentityStore
 	scripts *script.Store
 	vault   *vault.Vault
 
@@ -99,6 +101,7 @@ type Model struct {
 	confirm   confirmModel
 	settings  *settingsModel
 	scriptsUI *scriptsModel
+	identsUI  *identsModel
 
 	statusMsg   string
 	statusType  statusKind
@@ -112,11 +115,12 @@ type Model struct {
 
 // New builds the root model. v is nil on first run (no vault.meta yet); the
 // welcome screen then decides between minting a vault and restoring from git.
-func New(cfgDir string, cfg *config.Config, store *profile.Store, scripts *script.Store, v *vault.Vault) *Model {
+func New(cfgDir string, cfg *config.Config, store *profile.Store, idents *profile.IdentityStore, scripts *script.Store, v *vault.Vault) *Model {
 	m := &Model{
 		cfgDir:   cfgDir,
 		cfg:      cfg,
 		store:    store,
+		idents:   idents,
 		scripts:  scripts,
 		vault:    v,
 		testing:  map[string]bool{},
@@ -359,6 +363,8 @@ func (m *Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateSettings(msg)
 	case scrScripts:
 		return m.updateScripts(msg)
+	case scrIdentities:
+		return m.updateIdentities(msg)
 	default:
 		return m.updateList(msg)
 	}
@@ -409,6 +415,7 @@ func (m *Model) pinHostKey(profileID, fp, line string) {
 // --- commands ---
 
 func (m *Model) testCmd(p profile.Profile) tea.Cmd {
+	p = m.effective(p)
 	creds, err := m.credsFor(&p)
 	if err != nil {
 		return func() tea.Msg {
@@ -420,26 +427,51 @@ func (m *Model) testCmd(p profile.Profile) tea.Cmd {
 	}
 }
 
+// effective returns a copy of p with identity-backed fields resolved: a
+// profile bound to an identity takes its username and auth kinds from the
+// identity, live — editing the identity updates every bound profile.
+func (m *Model) effective(p profile.Profile) profile.Profile {
+	if p.IdentityID == "" {
+		return p
+	}
+	if id := m.idents.ByID(p.IdentityID); id != nil {
+		p.User = id.User
+		p.Auth = id.Auth
+	}
+	return p
+}
+
 func (m *Model) credsFor(p *profile.Profile) (sshx.Credentials, error) {
 	var creds sshx.Credentials
 	if !m.vault.Unlocked() {
 		return creds, fmt.Errorf("vault is locked — press u to unlock")
 	}
-	if p.HasAuth(profile.AuthPassword) {
-		b, err := m.vault.Get(p.PassSecret())
+	// An identity-backed profile reads the identity's secrets; otherwise its own.
+	pass, key, phrase := p.PassSecret(), p.KeySecret(), p.PassphraseSecret()
+	hasPw, hasKey := p.HasAuth(profile.AuthPassword), p.HasAuth(profile.AuthKey)
+	if p.IdentityID != "" {
+		id := m.idents.ByID(p.IdentityID)
+		if id == nil {
+			return creds, fmt.Errorf("the identity for %s no longer exists — edit the profile", p.Name)
+		}
+		pass, key, phrase = id.PassSecret(), id.KeySecret(), id.PassphraseSecret()
+		hasPw, hasKey = id.HasAuth(profile.AuthPassword), id.HasAuth(profile.AuthKey)
+	}
+	if hasPw {
+		b, err := m.vault.Get(pass)
 		if err != nil {
 			return creds, fmt.Errorf("password missing from vault: %w", err)
 		}
 		creds.Password = string(b)
 	}
-	if p.HasAuth(profile.AuthKey) {
-		b, err := m.vault.Get(p.KeySecret())
+	if hasKey {
+		b, err := m.vault.Get(key)
 		if err != nil {
 			return creds, fmt.Errorf("ssh key missing from vault: %w", err)
 		}
 		creds.PrivateKey = b
-		if m.vault.Has(p.PassphraseSecret()) {
-			pp, err := m.vault.Get(p.PassphraseSecret())
+		if m.vault.Has(phrase) {
+			pp, err := m.vault.Get(phrase)
 			if err == nil {
 				creds.Passphrase = string(pp)
 			}
@@ -447,6 +479,10 @@ func (m *Model) credsFor(p *profile.Profile) (sshx.Credentials, error) {
 	}
 	return creds, nil
 }
+
+// Identity-backed profiles resolve their effective user before any real
+// connection: startConnect, testCmd, and startRunScript all go through
+// m.effective so ssh authenticates as the identity's user.
 
 // startConnect kicks off a connect: credentials are resolved and the host is
 // preflighted asynchronously while the TUI keeps running (spinner in the
@@ -456,6 +492,7 @@ func (m *Model) credsFor(p *profile.Profile) (sshx.Credentials, error) {
 // for the duration so the probe and the session don't burst connections
 // together (some gateways rate-limit new SSH connections per source).
 func (m *Model) startConnect(p profile.Profile) tea.Cmd {
+	p = m.effective(p)
 	creds, err := m.credsFor(&p)
 	if err != nil {
 		m.setStatus(statusErr, err.Error())
@@ -635,6 +672,8 @@ func (m *Model) View() string {
 		body = m.settings.view(m.width, bodyH)
 	case scrScripts:
 		body = m.scriptsUI.view(m.width, bodyH)
+	case scrIdentities:
+		body = m.viewIdentities(m.width, bodyH)
 	default:
 		body = m.viewList()
 	}
@@ -708,7 +747,7 @@ func (m *Model) legend(avail int) string {
 	}
 	tiers := [][][2]string{
 		{{"enter", "connect"}, {"r", "run script"}, {"m", "scripts"}, {"a", "add"}, {"e", "edit"}, {"c", "category"}, {"d", "delete"}, {"t", "test"},
-			{"s", "sync"}, {"g", "settings"}, {"i", "import"}, {"o", "sort"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
+			{"y", "identities"}, {"s", "sync"}, {"g", "settings"}, {"i", "import"}, {"o", "sort"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
 		{{"enter", "connect"}, {"r", "run"}, {"a", "add"}, {"e", "edit"}, {"d", "delete"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
 		{{"enter", "connect"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
 		{{"?", "help"}, {"q", "quit"}},

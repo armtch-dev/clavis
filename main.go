@@ -112,6 +112,10 @@ func buildModel(cfgDir string) (*tui.Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	idents, err := profile.LoadIdentities(cfgDir)
+	if err != nil {
+		return nil, err
+	}
 	scripts, err := script.LoadStore(cfgDir)
 	if err != nil {
 		return nil, err
@@ -122,7 +126,7 @@ func buildModel(cfgDir string) (*tui.Model, error) {
 	} else if err != nil {
 		return nil, err
 	}
-	return tui.New(cfgDir, cfg, store, scripts, v), nil
+	return tui.New(cfgDir, cfg, store, idents, scripts, v), nil
 }
 
 // dumpFrame renders a single frame to stdout and exits — a debug hook so

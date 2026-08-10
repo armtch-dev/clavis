@@ -28,13 +28,17 @@ const (
 )
 
 type Profile struct {
-	ID        string     `json:"id"`
-	Name      string     `json:"name"`
-	Host      string     `json:"host"` // DNS name or IP
-	Port      int        `json:"port"`
-	User      string     `json:"user"`
-	Auth      []AuthKind `json:"auth"` // which credentials exist in the vault
-	ProxyJump string     `json:"proxy_jump,omitempty"`
+	ID   string     `json:"id"`
+	Name string     `json:"name"`
+	Host string     `json:"host"` // DNS name or IP
+	Port int        `json:"port"`
+	User string     `json:"user"`
+	Auth []AuthKind `json:"auth"` // which credentials exist in the vault
+	// IdentityID binds this profile to a reusable identity; when set, the
+	// identity supplies the username, auth kinds, and vault secrets, and the
+	// profile's own User/Auth may be empty.
+	IdentityID string `json:"identity_id,omitempty"`
+	ProxyJump  string `json:"proxy_jump,omitempty"`
 	// Category is the list's grouping bucket ("cloud", "local", "work") — a
 	// single label, deliberately separate from Tags: tags are free-form
 	// labels used for filtering and script matching, the category is where
@@ -195,11 +199,14 @@ func Validate(p *Profile) error {
 	if p.Port < 1 || p.Port > 65535 {
 		return errors.New("port must be 1-65535")
 	}
-	if p.User == "" || !userRe.MatchString(p.User) {
-		return errors.New("user looks invalid")
-	}
-	if len(p.Auth) == 0 {
-		return errors.New("profile needs at least one auth method (password or key)")
+	// An identity-backed profile takes user + auth from the identity.
+	if p.IdentityID == "" {
+		if p.User == "" || !userRe.MatchString(p.User) {
+			return errors.New("user looks invalid")
+		}
+		if len(p.Auth) == 0 {
+			return errors.New("profile needs at least one auth method (password or key)")
+		}
 	}
 	if p.ProxyJump != "" {
 		if err := ValidateProxyJump(p.ProxyJump); err != nil {

@@ -446,6 +446,8 @@ func (m *Model) startRunScript(profileID, name, content string) tea.Cmd {
 		m.setStatus(statusErr, "script runs through a ProxyJump are not supported yet")
 		return nil
 	}
+	ep := m.effective(*p)
+	p = &ep
 	creds, err := m.credsFor(p)
 	if err != nil {
 		m.setStatus(statusErr, err.Error())

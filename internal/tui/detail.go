@@ -42,6 +42,8 @@ func (m *Model) renderDetail(p *profile.Profile, l listLayout, avail int) string
 	if p == nil {
 		return pane.Render(theme.Hint.Render("no profile selected"))
 	}
+	ep := m.effective(*p)
+	p = &ep
 
 	tiers := []detailTier{
 		{chart: true, labels: true, rules: true, fpWrap: true},
@@ -93,6 +95,13 @@ func (m *Model) detailLines(p *profile.Profile, cw int, t detailTier) []string {
 		auth = append(auth, "none")
 	}
 	lines = append(lines, label("auth")+theme.Value.Render(strings.Join(auth, "  ")))
+	if p.IdentityID != "" {
+		name := "(deleted)"
+		if id := m.idents.ByID(p.IdentityID); id != nil {
+			name = id.Name
+		}
+		lines = append(lines, label("ident")+theme.Value.Render(truncTo(name, cw-6)))
+	}
 	if p.Category != "" {
 		lines = append(lines, label("group")+theme.Value.Render(truncTo(p.Category, cw-6)))
 	}
