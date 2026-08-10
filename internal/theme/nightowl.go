@@ -89,24 +89,71 @@ var (
 	SparkDim = lipgloss.Color(BlendHex(HexMuted, HexBg, 0.40))
 )
 
-// Init adapts the blended tints (CardBg, Surface, Faint, Subtle, SparkDim)
-// to the terminal's actual background colour. The defaults assume Night
-// Owl's #011627; on any other background they lose their intended
-// relationship to it — on a mid or light background the dim tiers can sink
-// into the wallpaper entirely. Call once from main before the tea program
-// starts — the OSC query needs the terminal to itself.
+// Init adapts the palette to the terminal's actual background colour. The
+// defaults assume Night Owl's #011627; on any other background they lose
+// their intended relationship to it — on a mid or light background the dim
+// tiers can sink into the wallpaper entirely. Call once from main before
+// the tea program starts — the OSC query needs the terminal to itself.
+//
+// Three outcomes:
+//   - query answered, Night Owl navy → keep the designed palette
+//   - query answered, anything else  → rebase the tints onto the real bg
+//   - query unanswered (tmux/screen/non-TTY) → the background is
+//     unknowable; truecolor guesses can land invisible, so fall back to
+//     the terminal's own ANSI palette, which its theme guarantees is
+//     legible against itself.
 func Init() {
-	out := termenv.NewOutput(os.Stdout)
-	hex := termenv.ConvertToRGB(out.BackgroundColor()).Hex()
-	// termenv falls back to ANSI black when the terminal can't be queried
-	// (tmux/screen, non-TTY, backgrounded process), which is indistinguishable
-	// from a real #000000 answer. Skip both: a spurious rebase in the failure
-	// case is worse than keeping Night Owl's near-black defaults on a truly
-	// black terminal.
-	if hex == "#000000" || hex == HexBg {
+	// tmux/screen sit between us and the real terminal and don't answer the
+	// query — skipping straight to the fallback also avoids stalling launch
+	// on termenv's multi-second OSC timeout.
+	if os.Getenv("TMUX") != "" ||
+		strings.HasPrefix(os.Getenv("TERM"), "screen") ||
+		strings.HasPrefix(os.Getenv("TERM"), "tmux") {
+		ansiFallback()
+		return
+	}
+	bg := termenv.NewOutput(os.Stdout).BackgroundColor()
+	rgb, answered := bg.(termenv.RGBColor)
+	if !answered {
+		ansiFallback()
+		return
+	}
+	hex := termenv.ConvertToRGB(rgb).Hex()
+	if hex == HexBg {
 		return
 	}
 	rebase(hex)
+}
+
+// ansiFallback remaps every token onto ANSI palette slots. It trades the
+// designed Night Owl look for guaranteed legibility: the user's terminal
+// theme chose these sixteen colours to work on its own background, which
+// we cannot see. Hierarchy flattens a little (Sub joins the default fg,
+// chrome tints disappear) — legible beats subtle.
+func ansiFallback() {
+	Red, Green, Yellow = lipgloss.Color("1"), lipgloss.Color("2"), lipgloss.Color("3")
+	Blue, Magenta, Cyan = lipgloss.Color("4"), lipgloss.Color("5"), lipgloss.Color("6")
+	BrYellow, BrCyan = Yellow, Cyan
+	Muted = lipgloss.Color("8") // "bright black": every theme's designed muted tone
+	Border, SelBg = Muted, Muted
+	Subtle, Faint, SparkDim = Muted, Muted, Muted
+	CardBg, Surface = lipgloss.Color(""), lipgloss.Color("") // no chrome tint
+
+	Title = lipgloss.NewStyle().Foreground(Cyan).Bold(true)
+	Label = lipgloss.NewStyle().Foreground(Blue)
+	Value = lipgloss.NewStyle() // terminal default foreground
+	Accent = lipgloss.NewStyle().Foreground(Cyan)
+	Sub = lipgloss.NewStyle() // default fg — legible beats subtle
+	Dim = lipgloss.NewStyle().Foreground(Muted)
+	Hint = lipgloss.NewStyle().Foreground(Muted)
+	Spark = lipgloss.NewStyle().Foreground(Muted)
+	StatusOK = lipgloss.NewStyle().Foreground(Green)
+	StatusWarn = lipgloss.NewStyle().Foreground(Yellow)
+	StatusErr = lipgloss.NewStyle().Foreground(Red)
+	SelTick = lipgloss.NewStyle().Foreground(Cyan)
+	Chip = lipgloss.NewStyle().Foreground(Muted)
+	Tag = lipgloss.NewStyle().Foreground(Blue)
+	Panel = Panel.BorderForeground(Border)
 }
 
 // rebase recomputes every bg-relative tint (and the styles built on them)
