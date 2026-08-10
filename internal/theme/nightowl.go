@@ -127,22 +127,18 @@ func rebase(bgHex string) {
 
 // Core text styles — matte: bold is used only for the single title accent.
 var (
-	Title   = lipgloss.NewStyle().Foreground(BrCyan).Bold(true)
-	Section = lipgloss.NewStyle().Foreground(Muted)
-	Label   = lipgloss.NewStyle().Foreground(Blue)
-	Value   = lipgloss.NewStyle().Foreground(Fg)
-	Accent  = lipgloss.NewStyle().Foreground(BrCyan)
-	Sub     = lipgloss.NewStyle().Foreground(Subtle)
-	Dim     = lipgloss.NewStyle().Foreground(Muted)
-	Hint    = lipgloss.NewStyle().Foreground(Faint)
-	Spark   = lipgloss.NewStyle().Foreground(SparkDim)
+	Title  = lipgloss.NewStyle().Foreground(BrCyan).Bold(true)
+	Label  = lipgloss.NewStyle().Foreground(Blue)
+	Value  = lipgloss.NewStyle().Foreground(Fg)
+	Accent = lipgloss.NewStyle().Foreground(BrCyan)
+	Sub    = lipgloss.NewStyle().Foreground(Subtle)
+	Dim    = lipgloss.NewStyle().Foreground(Muted)
+	Hint   = lipgloss.NewStyle().Foreground(Faint)
+	Spark  = lipgloss.NewStyle().Foreground(SparkDim)
 
 	StatusOK   = lipgloss.NewStyle().Foreground(Green)
 	StatusWarn = lipgloss.NewStyle().Foreground(BrYellow)
 	StatusErr  = lipgloss.NewStyle().Foreground(Red)
-
-	// MutedText kept for existing callers; equivalent to Dim.
-	MutedText = Dim
 
 	// Selected row: the SelBg fill is painted by the list renderer itself
 	// (tui.selFill) so per-cell foregrounds survive on top of it — no forced
@@ -158,15 +154,6 @@ var (
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(Border).
 		Padding(1, 3)
-
-	// PanelBorder kept for existing callers (square, matte).
-	PanelBorder = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(Border)
-
-	// Compatibility aliases.
-	TitleFocused   = Title
-	TitleUnfocused = lipgloss.NewStyle().Foreground(Blue)
 )
 
 // Divider returns a full-width hairline in the faint steel colour.

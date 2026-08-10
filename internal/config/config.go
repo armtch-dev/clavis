@@ -30,7 +30,7 @@ func Dir() (string, error) {
 }
 
 func Load(dir string) (*Config, error) {
-	c := &Config{Sync: gitsync.Settings{Branch: gitsync.DefaultBranch}}
+	c := &Config{}
 	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -40,9 +40,6 @@ func Load(dir string) (*Config, error) {
 	}
 	if err := json.Unmarshal(raw, c); err != nil {
 		return nil, err
-	}
-	if c.Sync.Branch == "" {
-		c.Sync.Branch = gitsync.DefaultBranch
 	}
 	return c, nil
 }
