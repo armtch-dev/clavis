@@ -324,10 +324,12 @@ func (s *scriptsModel) viewPicker(width, height int) string {
 		if fl := firstLine(sc.Content); fl != "" && cw-lipgloss.Width(line)-3 > 6 {
 			line += theme.Dim.Render("  " + truncTo(fl, cw-lipgloss.Width(line)-3))
 		}
+		// Same selection treatment as the profile list (▎ + bg fill) — one
+		// selection language across the app.
 		if i == s.cursor {
-			b.WriteString(theme.SelTick.Render(theme.IconPointer) + " " + line + "\n")
+			b.WriteString(theme.Accent.Render("▎") + selFill(ansi.Truncate(" "+line, cw-1, "…"), cw-1) + "\n")
 		} else {
-			b.WriteString("  " + line + "\n")
+			b.WriteString("  " + ansi.Truncate(line, cw-2, "…") + "\n")
 		}
 	}
 	if len(list) > maxRows {

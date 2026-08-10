@@ -623,7 +623,9 @@ func (w *wizardModel) progress(width int) string {
 	for _, s := range seq {
 		switch {
 		case s == w.step:
-			parts = append(parts, theme.Accent.Render("●"))
+			// ◉, not ●: current vs completed must differ by shape, not
+			// colour alone (NO_COLOR, colour-vision deficiency).
+			parts = append(parts, theme.Accent.Render("◉"))
 		case s < w.step:
 			parts = append(parts, theme.Dim.Render("●"))
 		default:

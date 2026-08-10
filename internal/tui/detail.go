@@ -69,7 +69,7 @@ func (m *Model) detailLines(p *profile.Profile, cw int, t detailTier) []string {
 	lines := []string{
 		theme.Accent.Render(truncTo(p.Name, cw)),
 		theme.Value.Render(truncTo(fmt.Sprintf("%s@%s:%d", p.User, p.Host, p.Port), cw)),
-		statusBadge(st, have),
+		statusBadge(st, have, p.ProxyJump != ""),
 	}
 	section := func(name string) {
 		if t.rules {
@@ -129,7 +129,12 @@ func (m *Model) detailLines(p *profile.Profile, cw int, t detailTier) []string {
 // statusBadge renders the reachability state as a bold coloured badge line:
 // `● UP · 13ms` in the latency band colour, `○ DOWN · ↓ 7m` in red, or a dim
 // `· UNKNOWN` when no probe has answered yet.
-func statusBadge(st probe.Status, have bool) string {
+func statusBadge(st probe.Status, have, viaJump bool) string {
+	// Jump hosts are deliberately unprobed (only reachable via the hop) —
+	// that's different information from "no data yet".
+	if viaJump {
+		return theme.Dim.Render(theme.IconIdle + " VIA JUMP · not probed")
+	}
 	switch {
 	case have && st.Reachable:
 		s := lipgloss.NewStyle().Foreground(theme.LatencyColor(st.LatencyMs)).Bold(true)
