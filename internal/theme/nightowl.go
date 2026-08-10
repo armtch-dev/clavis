@@ -67,9 +67,12 @@ var (
 	Border   = lipgloss.Color(HexBorder)
 
 	// CardBg sits just above the bg — same 4.5% blend toward white scriptorium
-	// uses. Faint is a dimmer steel for dividers and hairlines.
+	// uses. Faint is a dimmer steel for dividers, hairlines, and whisper
+	// text; 25% toward the bg (not deeper) so it stays readable on
+	// terminals whose effective background is lighter than Night Owl's —
+	// translucent windows report a dark bg but composite much lighter.
 	CardBg = lipgloss.Color(BlendHex(HexBg, HexWhite, 0.045))
-	Faint  = lipgloss.Color(BlendHex(HexBorder, HexBg, 0.45))
+	Faint  = lipgloss.Color(BlendHex(HexBorder, HexBg, 0.25))
 
 	// Surface is the fixed-chrome tint (header bar, footer legend): a step
 	// above CardBg — 7% toward white — so the bars read as anchored chrome
@@ -86,21 +89,15 @@ var (
 	SparkDim = lipgloss.Color(BlendHex(HexMuted, HexBg, 0.40))
 )
 
-// Init adapts the blended tints (CardBg, Faint, Subtle, SparkDim) to the
-// terminal's actual background colour. The blends assume Night Owl's #011627;
-// on any other dark theme they land *darker* than the real background and
-// lose their intended relationship to it. Call once from main before the tea
-// program starts — the OSC query needs the terminal to itself.
-//
-// Light backgrounds are ignored: the Night Owl foregrounds are unreadable on
-// them regardless, so blending toward white would only make things worse.
+// Init adapts the blended tints (CardBg, Surface, Faint, Subtle, SparkDim)
+// to the terminal's actual background colour. The defaults assume Night
+// Owl's #011627; on any other background they lose their intended
+// relationship to it — on a mid or light background the dim tiers can sink
+// into the wallpaper entirely. Call once from main before the tea program
+// starts — the OSC query needs the terminal to itself.
 func Init() {
 	out := termenv.NewOutput(os.Stdout)
-	c := termenv.ConvertToRGB(out.BackgroundColor())
-	if 0.299*c.R+0.587*c.G+0.114*c.B >= 0.5 { // perceived luminance: not dark
-		return
-	}
-	hex := c.Hex()
+	hex := termenv.ConvertToRGB(out.BackgroundColor()).Hex()
 	// termenv falls back to ANSI black when the terminal can't be queried
 	// (tmux/screen, non-TTY, backgrounded process), which is indistinguishable
 	// from a real #000000 answer. Skip both: a spurious rebase in the failure
@@ -113,16 +110,36 @@ func Init() {
 }
 
 // rebase recomputes every bg-relative tint (and the styles built on them)
-// against the given background hex.
+// against the given background hex. On dark backgrounds the tiers blend the
+// Night Owl steels toward the bg as before; on light-ish backgrounds
+// (translucent windows, pastel themes) the low tiers must darken AWAY from
+// the bg instead — a near-bg steel that whispers on navy is invisible on
+// lavender.
 func rebase(bgHex string) {
-	CardBg = lipgloss.Color(BlendHex(bgHex, HexWhite, 0.045))
-	Surface = lipgloss.Color(BlendHex(bgHex, HexWhite, 0.07))
-	Faint = lipgloss.Color(BlendHex(HexBorder, bgHex, 0.45))
-	Subtle = lipgloss.Color(BlendHex(HexFg, bgHex, 0.45))
-	SparkDim = lipgloss.Color(BlendHex(HexMuted, bgHex, 0.40))
+	dark := hexLum(bgHex) < 0.5
+	if dark {
+		CardBg = lipgloss.Color(BlendHex(bgHex, HexWhite, 0.045))
+		Surface = lipgloss.Color(BlendHex(bgHex, HexWhite, 0.07))
+		Faint = lipgloss.Color(BlendHex(HexBorder, bgHex, 0.25))
+		Subtle = lipgloss.Color(BlendHex(HexFg, bgHex, 0.45))
+		SparkDim = lipgloss.Color(BlendHex(HexMuted, bgHex, 0.40))
+	} else {
+		CardBg = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.045))
+		Surface = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.07))
+		Faint = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.40))
+		Subtle = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.60))
+		SparkDim = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.30))
+	}
 	Hint = Hint.Foreground(Faint)
 	Sub = Sub.Foreground(Subtle)
 	Spark = Spark.Foreground(SparkDim)
+}
+
+// hexLum is the perceived luminance of a #rrggbb colour, 0 (black) to 1.
+func hexLum(h string) float64 {
+	var r, g, b int
+	fmt.Sscanf(h, "#%02x%02x%02x", &r, &g, &b)
+	return (0.299*float64(r) + 0.587*float64(g) + 0.114*float64(b)) / 255
 }
 
 // Core text styles — matte: bold is used only for the single title accent.

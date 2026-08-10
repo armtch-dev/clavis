@@ -715,13 +715,16 @@ func choiceRow(opts [][2]string) string {
 	return strings.Join(parts, theme.Dim.Render("     "))
 }
 
-// hintKeys renders "key label" pairs for a footer.
+// hintKeys renders "key label" pairs for a footer. Labels use Sub, not
+// Muted: footer hints are navigation the user must be able to read, and Sub
+// both sits a tier brighter and rebases onto the terminal's real background
+// — Muted is a fixed Night Owl colour that can vanish on other backgrounds.
 func hintKeys(pairs [][2]string) string {
 	var parts []string
 	for _, p := range pairs {
-		parts = append(parts, theme.Accent.Render(p[0])+" "+theme.Dim.Render(p[1]))
+		parts = append(parts, theme.Accent.Render(p[0])+" "+theme.Sub.Render(p[1]))
 	}
-	return strings.Join(parts, theme.Dim.Render("   "))
+	return strings.Join(parts, "   ")
 }
 
 func min(a, b int) int {
