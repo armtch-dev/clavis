@@ -110,15 +110,13 @@ func buildModel(cfgDir string) (*tui.Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	freshIdentity := ""
 	v, err := vault.Load(cfgDir)
 	if err == vault.ErrNotInited {
-		v, freshIdentity, err = vault.Init(cfgDir)
-	}
-	if err != nil {
+		v = nil // first run: the welcome screen decides new-vault vs restore-from-git
+	} else if err != nil {
 		return nil, err
 	}
-	return tui.New(cfgDir, cfg, store, scripts, v, freshIdentity), nil
+	return tui.New(cfgDir, cfg, store, scripts, v), nil
 }
 
 // dumpFrame renders a single frame to stdout and exits — a debug hook so

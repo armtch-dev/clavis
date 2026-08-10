@@ -36,17 +36,22 @@ Just launch it:
 clavis
 ```
 
-On first launch the vault is created automatically and your master key is shown once—it looks like `AGE-SECRET-KEY-1…`. Write it down and store it somewhere outside this machine (a password manager, an encrypted note, a piece of paper in a safe). Clavis will never write the master key to disk.
+On first launch a welcome screen offers two paths:
+
+- **`n` — new vault**: generates your master key and shows it once—it looks like `AGE-SECRET-KEY-1…`. Write it down and store it somewhere outside this machine (a password manager, an encrypted note, a piece of paper in a safe). Clavis will never write the master key to disk.
+- **`r` — restore**: setting up a machine you already have a clavis repo for? Paste the repo URL and a GitHub token, clavis fetches your encrypted config, then paste the master key from your original setup to unlock it. Profiles, scripts, settings, and credentials all come back; the token is stored encrypted on this machine only.
 
 On subsequent runs, clavis prompts you to unlock the vault. It tries three non-interactive sources first:
 
 1. `CLAVIS_KEY` environment variable (for scripts and CI)
 2. `CLAVIS_KEY_FILE` environment variable (path to a file holding the master key)
-3. macOS Keychain (opt-in via settings; weakens the "offline key" guarantee)
+3. macOS Keychain (opt-in via settings; each read is gated by Touch ID / Apple Watch / password)
 
-If none of those work, you'll see an interactive prompt.
+If none of those work, you'll see an interactive prompt. On the prompt, `tab` unlocks with an enrolled FIDO2 security key instead of pasting.
 
-To cache the key in your login keychain (macOS only), press `k` on the first-run key screen, or unlock the vault once and toggle it in settings (`g`, then `k`). This trades security for convenience; you decide.
+To cache the key in your login keychain (macOS only), press `k` on the first-run key screen, or unlock the vault once and toggle it in settings (`g`, then `k`). Reads are Touch ID-gated, but the key does move onto the machine; you decide.
+
+To unlock with a YubiKey or other FIDO2 security key (macOS and Linux): install the fido2 tools (`brew install libfido2` / `apt install fido2-tools`), unlock once, then enroll in settings (`g`, then `f`). The master key is stored on this machine encrypted to a secret only a touch of that physical key can re-derive; see docs/SECURITY.md.
 
 ## Usage
 

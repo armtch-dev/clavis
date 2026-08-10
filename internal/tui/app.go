@@ -26,7 +26,8 @@ import (
 type screen int
 
 const (
-	scrList screen = iota
+	scrList    screen = iota
+	scrWelcome        // first run: choose new vault vs restore from git
 	scrUnlock
 	scrFirstRun // key banner after vault init (also after rekey/reset from UI)
 	scrWizard
@@ -91,6 +92,7 @@ type Model struct {
 	statuses map[string]probe.Status
 
 	// sub-screens
+	welcome   *welcomeModel
 	unlock    unlockModel
 	firstRun  keyBannerModel
 	wizard    *wizardModel
@@ -108,9 +110,9 @@ type Model struct {
 	spinning bool // a spinner tick is in flight
 }
 
-// New builds the root model. identity is non-empty only right after a
-// first-run vault init (so the key banner can be shown once).
-func New(cfgDir string, cfg *config.Config, store *profile.Store, scripts *script.Store, v *vault.Vault, freshIdentity string) *Model {
+// New builds the root model. v is nil on first run (no vault.meta yet); the
+// welcome screen then decides between minting a vault and restoring from git.
+func New(cfgDir string, cfg *config.Config, store *profile.Store, scripts *script.Store, v *vault.Vault) *Model {
 	m := &Model{
 		cfgDir:   cfgDir,
 		cfg:      cfg,
@@ -131,9 +133,9 @@ func New(cfgDir string, cfg *config.Config, store *profile.Store, scripts *scrip
 	m.syncTargets()
 
 	switch {
-	case freshIdentity != "":
-		m.firstRun = newKeyBanner(freshIdentity, cfg, cfgDir)
-		m.screen = scrFirstRun
+	case v == nil:
+		m.welcome = &welcomeModel{}
+		m.screen = scrWelcome
 	case !v.Unlocked():
 		if id, src := vault.ResolveIdentity(); id != "" {
 			if err := v.Unlock(id); err == nil {
@@ -142,7 +144,7 @@ func New(cfgDir string, cfg *config.Config, store *profile.Store, scripts *scrip
 				break
 			}
 		}
-		m.unlock = newUnlock(v)
+		m.unlock = newUnlock(v, cfgDir)
 		m.screen = scrUnlock
 	default:
 		m.screen = scrList
@@ -326,6 +328,8 @@ func (m *Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch m.screen {
+	case scrWelcome:
+		return m.updateWelcome(msg)
 	case scrUnlock:
 		return m.updateUnlock(msg)
 	case scrFirstRun:
@@ -590,6 +594,8 @@ func (m *Model) View() string {
 	bodyH := max(m.height-m.footerHeight(), 1)
 	var body string
 	switch m.screen {
+	case scrWelcome:
+		body = m.welcome.view(m.width, bodyH)
 	case scrUnlock:
 		body = m.unlock.view(m.width, bodyH)
 	case scrFirstRun:

@@ -82,6 +82,12 @@ func LoadFromKeychain() (string, error) {
 	if runtime.GOOS != "darwin" {
 		return "", fmt.Errorf("keychain storage is only available on macOS")
 	}
+	// Touch ID / Apple Watch / password gate before the cached key is read.
+	// Failure (declined, or a headless session with no auth UI) just falls
+	// back to the interactive key prompt.
+	if err := authenticateLocal("unlock the clavis vault"); err != nil {
+		return "", err
+	}
 	out, err := exec.Command("security", "find-generic-password",
 		"-s", keychainService, "-a", keychainAccount, "-w").Output()
 	if err != nil {
