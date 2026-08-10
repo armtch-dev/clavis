@@ -78,6 +78,18 @@ func SaveToKeychain(identity string) error {
 	return nil
 }
 
+// HasKeychain reports whether a cached key exists — without reading the
+// secret, so no auth prompt fires. The entry's presence IS the opt-in state:
+// keeping it machine-local means one machine's convenience choice can never
+// sync to another through config.json.
+func HasKeychain() bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	return exec.Command("security", "find-generic-password",
+		"-s", keychainService, "-a", keychainAccount).Run() == nil
+}
+
 func LoadFromKeychain() (string, error) {
 	if runtime.GOOS != "darwin" {
 		return "", fmt.Errorf("keychain storage is only available on macOS")

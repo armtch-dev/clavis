@@ -155,6 +155,9 @@ func New(cfgDir string, cfg *config.Config, store *profile.Store, scripts *scrip
 func (m *Model) syncTargets() {
 	targets := make([]probe.Target, 0, len(m.store.Profiles))
 	for _, p := range m.store.Profiles {
+		if p.ProxyJump != "" {
+			continue // only reachable via the jump: a direct TCP probe would show a false "down"
+		}
 		targets = append(targets, probe.Target{ProfileID: p.ID, Addr: p.Addr()})
 	}
 	m.monitor.SetTargets(targets)
@@ -169,7 +172,11 @@ func (m *Model) setStatus(k statusKind, msg string) {
 
 // spinnerActive reports whether any in-flight work warrants animation.
 func (m *Model) spinnerActive() bool {
-	return m.syncing || len(m.testing) > 0 || m.connecting != "" || (m.wizard != nil && m.wizard.awaitingTest)
+	return m.syncing || len(m.testing) > 0 || m.connecting != "" ||
+		(m.wizard != nil && m.wizard.awaitingTest) ||
+		(m.welcome != nil && m.welcome.busy) ||
+		(m.settings != nil && m.settings.busy != "") ||
+		m.unlock.fidoBusy
 }
 
 // --- messages ---
@@ -416,7 +423,7 @@ func (m *Model) testCmd(p profile.Profile) tea.Cmd {
 func (m *Model) credsFor(p *profile.Profile) (sshx.Credentials, error) {
 	var creds sshx.Credentials
 	if !m.vault.Unlocked() {
-		return creds, fmt.Errorf("vault is locked — restart clavis and unlock to use credentials")
+		return creds, fmt.Errorf("vault is locked — press u to unlock")
 	}
 	if p.HasAuth(profile.AuthPassword) {
 		b, err := m.vault.Get(p.PassSecret())
@@ -458,6 +465,12 @@ func (m *Model) startConnect(p profile.Profile) tea.Cmd {
 	m.pending = &pendingConnect{p: p, creds: creds}
 	m.monitor.Suspend(p.ID, true)
 	m.setStatus(statusInfo, "connecting to "+p.Name+"…")
+	// A jump-only host is unreachable directly — preflighting the target
+	// would block the connect forever. ssh does the jump itself, and its
+	// ConnectTimeout covers the stall case.
+	if p.ProxyJump != "" {
+		return func() tea.Msg { return preflightMsg{p.ID, nil} }
+	}
 	addr := p.Addr()
 	return func() tea.Msg {
 		return preflightMsg{p.ID, sshx.Preflight(addr, preflightTimeout)}
@@ -609,9 +622,9 @@ func (m *Model) View() string {
 	var body string
 	switch m.screen {
 	case scrWelcome:
-		body = m.welcome.view(m.width, bodyH)
+		body = m.welcome.view(m.spin.View(), m.width, bodyH)
 	case scrUnlock:
-		body = m.unlock.view(m.width, bodyH)
+		body = m.unlock.view(m.spin.View(), m.width, bodyH)
 	case scrFirstRun:
 		body = m.firstRun.view(m.width, bodyH)
 	case scrWizard:

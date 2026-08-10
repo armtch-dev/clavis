@@ -10,11 +10,11 @@ import (
 	"github.com/armtch-dev/clavis/internal/gitsync"
 )
 
+// Config holds synced, non-secret app settings. Machine-local state (the
+// keychain cache, the GitHub token, security-key enrollment) deliberately
+// lives elsewhere — config.json travels through git to other machines.
 type Config struct {
 	Sync gitsync.Settings `json:"sync"`
-	// KeychainOptIn records that the user chose to cache the master key in
-	// the macOS Keychain (weakens the offline-key guarantee; their call).
-	KeychainOptIn bool `json:"keychain_opt_in"`
 }
 
 // Dir returns the config directory: $CLAVIS_CONFIG_DIR, else ~/.config/clavis.

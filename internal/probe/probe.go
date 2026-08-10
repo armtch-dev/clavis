@@ -228,6 +228,11 @@ func (m *Monitor) probeAndReport(st *probeState) {
 	start := time.Now()
 	conn, err := net.DialTimeout("tcp", st.target.Addr, m.timeout)
 	elapsed := time.Since(start)
+	if err == nil {
+		// Before the lock: the banner exchange can block up to 2s, and
+		// Suspend/SetTargets (called from the UI thread) wait on this mutex.
+		politeClose(conn)
+	}
 
 	var status Status
 	m.mu.Lock()
@@ -240,7 +245,6 @@ func (m *Monitor) probeAndReport(st *probeState) {
 	}
 
 	if err == nil {
-		politeClose(conn)
 		latencyMs := float64(elapsed) / float64(time.Millisecond)
 		st.lastSeen = checkedAt
 		st.fails = 0

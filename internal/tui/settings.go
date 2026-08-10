@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"runtime"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/armtch-dev/clavis/internal/fido2"
 	"github.com/armtch-dev/clavis/internal/gitsync"
@@ -80,7 +82,10 @@ func (m *Model) updateUnlock(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.unlock.input.SetValue("")
 			return m, nil
 		}
-		if m.cfg.KeychainOptIn {
+		if vault.HasKeychain() {
+			// Refresh an existing cache entry (it may hold a pre-rekey key).
+			// Never CREATE one here: caching is opted into explicitly on this
+			// machine, in settings — not inherited from a synced config.
 			vault.SaveToKeychain(strings.TrimSpace(m.unlock.input.Value()))
 		}
 		m.screen = scrList
@@ -92,13 +97,13 @@ func (m *Model) updateUnlock(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (u unlockModel) view(w, h int) string {
+func (u unlockModel) view(spin string, w, h int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Unlock vault") + "\n\n")
 	b.WriteString(theme.Dim.Render("Paste your master key to decrypt stored credentials.") + "\n\n")
 	b.WriteString(u.input.View() + "\n")
 	if u.fidoBusy {
-		b.WriteString("\n" + theme.Accent.Render("touch your security key…") + "\n")
+		b.WriteString("\n" + spin + theme.Accent.Render(" touch your security key…") + "\n")
 	}
 	if u.errs != "" {
 		b.WriteString("\n" + theme.StatusErr.Render("✗ "+u.errs) + "\n")
@@ -110,7 +115,7 @@ func (u unlockModel) view(w, h int) string {
 	}
 	b.WriteString(hintKeys(hints) + "\n")
 	b.WriteString(theme.Hint.Render("lost the key?  clavis vault reset"))
-	return center(theme.Panel.Width(56).Render(b.String()), w, h)
+	return center(theme.Panel.Width(min(56, w-2)).Render(b.String()), w, h)
 }
 
 // --- first-run key banner ---
@@ -135,8 +140,6 @@ func (m *Model) updateFirstRun(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setStatus(statusErr, err.Error())
 		} else {
 			m.firstRun.saved = true
-			m.cfg.KeychainOptIn = true
-			m.cfg.Save(m.cfgDir)
 		}
 		return m, nil
 	case "enter":
@@ -158,11 +161,11 @@ func (k keyBannerModel) view(w, h int) string {
 	b.WriteString(theme.Divider(64) + "\n")
 	if k.saved {
 		b.WriteString(theme.StatusOK.Render("✓ cached in macOS Keychain (Touch ID unlocks on this Mac)") + "\n")
-	} else {
+	} else if runtime.GOOS == "darwin" {
 		b.WriteString(hintKeys([][2]string{{"k", "also cache in macOS Keychain"}}) + "\n")
 	}
 	b.WriteString(hintKeys([][2]string{{"enter", "I stored it safely — continue"}}))
-	return center(theme.Panel.Width(70).Render(b.String()), w, h)
+	return center(theme.Panel.Width(min(70, w-2)).Render(b.String()), w, h)
 }
 
 // --- settings screen ---
@@ -279,11 +282,24 @@ func (m *Model) settingsKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cfg.Sync.AutoSync = !m.cfg.Sync.AutoSync
 			m.cfg.Save(m.cfgDir)
 		case "k":
-			m.cfg.KeychainOptIn = !m.cfg.KeychainOptIn
-			if !m.cfg.KeychainOptIn {
-				vault.DeleteFromKeychain()
+			if runtime.GOOS != "darwin" {
+				return m, nil
 			}
-			m.cfg.Save(m.cfgDir)
+			if vault.HasKeychain() {
+				vault.DeleteFromKeychain()
+				m.setStatus(statusInfo, "keychain cache removed")
+				return m, nil
+			}
+			id, err := m.vault.Identity()
+			if err != nil {
+				s.errs = "unlock the vault first, then enable the keychain cache"
+				return m, nil
+			}
+			if err := vault.SaveToKeychain(id); err != nil {
+				s.errs = err.Error()
+			} else {
+				m.setStatus(statusOK, "master key cached in Keychain (Touch ID gated)")
+			}
 		case "f":
 			if !fido2.Available() {
 				s.errs = "fido2 tools not found — brew install libfido2 (or apt install fido2-tools)"
@@ -396,8 +412,9 @@ func (s *settingsModel) view(w, h int) string {
 		b.WriteString(hintKeys([][2]string{{"y", "create + push"}, {"esc", "cancel"}}) + "\n")
 	default:
 		row := func(k, label, val string) {
-			b.WriteString("  " + theme.Accent.Render(k) + "  " +
-				theme.Label.Width(30).Render(label) + theme.Value.Render(val) + "\n")
+			line := "  " + theme.Accent.Render(k) + "  " +
+				theme.Label.Width(30).Render(label) + theme.Value.Render(val)
+			b.WriteString(ansi.Truncate(line, dw, "…") + "\n")
 		}
 		cfg := s.app.cfg
 		tok := theme.Dim.Render("not set")
@@ -415,7 +432,9 @@ func (s *settingsModel) view(w, h int) string {
 		row("u", "use existing repo URL", remote)
 		row("c", "create new private repo", "")
 		row("a", "autosync on every change", onOff(cfg.Sync.AutoSync))
-		row("k", "cache master key in Keychain (Touch ID gated)", onOff(cfg.KeychainOptIn))
+		if runtime.GOOS == "darwin" {
+			row("k", "cache master key in Keychain (Touch ID gated)", onOff(vault.HasKeychain()))
+		}
 		row("f", "security-key unlock (FIDO2)", onOff(fido2.Enrolled(s.app.cfgDir)))
 		row("s", "sync now", "")
 	}
@@ -423,7 +442,7 @@ func (s *settingsModel) view(w, h int) string {
 		b.WriteString("\n" + theme.StatusErr.Render("✗ "+s.errs) + "\n")
 	}
 	if s.busy != "" {
-		b.WriteString("\n" + theme.Accent.Render(s.busy) + "\n")
+		b.WriteString("\n" + s.app.spin.View() + theme.Accent.Render(" "+s.busy) + "\n")
 	}
 	b.WriteString("\n" + theme.Divider(dw) + "\n" + theme.Hint.Render("esc back"))
 	return center(theme.Panel.Width(inner).Render(b.String()), w, h)

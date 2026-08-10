@@ -17,7 +17,6 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/armtch-dev/clavis/internal/config"
 	"github.com/armtch-dev/clavis/internal/gitsync"
 	"github.com/armtch-dev/clavis/internal/profile"
 	"github.com/armtch-dev/clavis/internal/sshconfig"
@@ -143,11 +142,7 @@ func VaultRekey(w io.Writer, configDir string) error {
 	fmt.Fprintln(w, "The OLD master key is now permanently useless — every secret has been re-encrypted under the new one.")
 	fmt.Fprintln(w, "Run sync from this machine, then unlock with the NEW key on every other machine that shares this vault.")
 
-	cfg, err := config.Load(configDir)
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-	if cfg.KeychainOptIn {
+	if vault.HasKeychain() {
 		if err := vault.SaveToKeychain(newIdentity); err != nil {
 			fmt.Fprintf(w, "warning: failed to update macOS Keychain entry: %v\n", err)
 		} else {
@@ -183,8 +178,7 @@ func VaultReset(w io.Writer, r io.Reader, configDir string) error {
 	fmt.Fprintln(w, "\nvault reset: all secrets wiped, a new master key has been generated.")
 	PrintKeyBanner(w, newIdentity)
 
-	cfg, err := config.Load(configDir)
-	if err == nil && cfg.KeychainOptIn {
+	if vault.HasKeychain() {
 		// The keychain still holds the now-useless old key; refresh it so a
 		// later ResolveIdentity() doesn't hand back a key that no longer
 		// matches the vault's recipient.
