@@ -29,6 +29,7 @@ usage:
   clavis import [path]   import hosts from ssh_config (default ~/.ssh/config)
   clavis vault rekey     rotate the master key (re-encrypts everything)
   clavis vault reset     wipe all credentials, mint a new key (lost-key path)
+  clavis uninstall       remove clavis and all local data (asks for confirmation)
   clavis version
 
 environment:
@@ -69,6 +70,9 @@ func run() error {
 				return cli.VaultReset(os.Stdout, os.Stdin, cfgDir)
 			}
 			return fmt.Errorf("usage: clavis vault rekey|reset")
+		case "uninstall":
+			exe, _ := os.Executable()
+			return cli.Uninstall(os.Stdout, os.Stdin, cfgDir, exe)
 		case "version", "--version", "-v":
 			fmt.Println("clavis", version)
 			return nil

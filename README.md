@@ -38,7 +38,7 @@ clavis
 
 On first launch a welcome screen offers two paths:
 
-- **`n` — new vault**: generates your master key and shows it once—it looks like `AGE-SECRET-KEY-1…`. Write it down and store it somewhere outside this machine (a password manager, an encrypted note, a piece of paper in a safe). Clavis will never write the master key to disk.
+- **`n` — new vault**: generates your master key and shows it once—it looks like `AGE-SECRET-KEY-1…`. Press `c` to copy it to the clipboard for pasting into a password manager (then clear the clipboard), and store it somewhere outside this machine. Clavis will never write the master key to disk.
 - **`r` — restore**: setting up a machine you already have a clavis repo for? Paste the repo URL and a GitHub token, clavis fetches your encrypted config, then paste the master key from your original setup to unlock it. Profiles, scripts, settings, and credentials all come back; the token is stored encrypted on this machine only.
 
 On subsequent runs, clavis prompts you to unlock the vault. It tries three non-interactive sources first:
@@ -116,6 +116,7 @@ clavis doctor              # Health check: key, vault, git, ssh
 clavis import [path]       # Import hosts from ssh_config (default ~/.ssh/config)
 clavis vault rekey         # Rotate the master key (re-encrypts everything)
 clavis vault reset         # Wipe all credentials, mint a new key (use if key is lost)
+clavis uninstall           # Remove clavis and all local data (synced repo untouched)
 clavis version             # Show version
 clavis --dump-frame        # Debug flag: render a single frame and exit
 ```

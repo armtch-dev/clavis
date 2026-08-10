@@ -237,3 +237,39 @@ func TestPrintKeyBanner(t *testing.T) {
 		t.Errorf("banner should tell the user to store the key outside this machine, got:\n%s", out)
 	}
 }
+
+func TestUninstallRequiresConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "profiles.json"), []byte("{}"), 0o600)
+
+	var buf bytes.Buffer
+	err := Uninstall(&buf, strings.NewReader("no\n"), dir, "")
+	if err == nil {
+		t.Fatal("uninstall must abort without the exact confirmation text")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "profiles.json")); err != nil {
+		t.Fatal("aborted uninstall must not touch the config dir")
+	}
+}
+
+func TestUninstallRemovesEverything(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "vault"), 0o700)
+	os.WriteFile(filepath.Join(dir, "vault", "x.age"), []byte("ct"), 0o600)
+	fakeBin := filepath.Join(t.TempDir(), "clavis")
+	os.WriteFile(fakeBin, []byte("#!/bin/sh\n"), 0o755)
+
+	var buf bytes.Buffer
+	if err := Uninstall(&buf, strings.NewReader("uninstall\n"), dir, fakeBin); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("config dir should be gone, stat err = %v", err)
+	}
+	if _, err := os.Stat(fakeBin); !os.IsNotExist(err) {
+		t.Errorf("binary should be gone, stat err = %v", err)
+	}
+	if !strings.Contains(buf.String(), "NOT touched") {
+		t.Errorf("output should reassure that the synced remote survives:\n%s", buf.String())
+	}
+}

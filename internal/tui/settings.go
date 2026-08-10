@@ -4,6 +4,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -124,6 +125,7 @@ func (u unlockModel) view(spin string, w, h int) string {
 type keyBannerModel struct {
 	identity string
 	saved    bool // user pressed k (keychain)
+	copied   bool // user pressed c (clipboard)
 }
 
 func newKeyBanner(identity string) keyBannerModel {
@@ -136,6 +138,13 @@ func (m *Model) updateFirstRun(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch key.String() {
+	case "c", "C":
+		if err := clipboard.WriteAll(m.firstRun.identity); err != nil {
+			m.setStatus(statusErr, "clipboard: "+err.Error())
+		} else {
+			m.firstRun.copied = true
+		}
+		return m, nil
 	case "k", "K":
 		if err := vault.SaveToKeychain(m.firstRun.identity); err != nil {
 			m.setStatus(statusErr, err.Error())
@@ -161,10 +170,21 @@ func (k keyBannerModel) view(w, h int) string {
 	b.WriteString(theme.Value.Render("cannot be recovered, only reset.") + "\n\n")
 	b.WriteString(theme.Accent.Render(k.identity) + "\n\n")
 	b.WriteString(theme.Divider(pw-6) + "\n")
+	if k.copied {
+		b.WriteString(theme.StatusOK.Render("✓ copied — paste it into your password manager, then clear the clipboard") + "\n")
+	}
 	if k.saved {
 		b.WriteString(theme.StatusOK.Render("✓ cached in macOS Keychain (Touch ID unlocks on this Mac)") + "\n")
-	} else if runtime.GOOS == "darwin" {
-		b.WriteString(hintKeys([][2]string{{"k", "also cache in macOS Keychain"}}) + "\n")
+	}
+	var hints [][2]string
+	if !k.copied {
+		hints = append(hints, [2]string{"c", "copy to clipboard"})
+	}
+	if !k.saved && runtime.GOOS == "darwin" {
+		hints = append(hints, [2]string{"k", "cache in macOS Keychain"})
+	}
+	if len(hints) > 0 {
+		b.WriteString(hintKeys(hints) + "\n")
 	}
 	b.WriteString(hintKeys([][2]string{{"enter", "I stored it safely — continue"}}))
 	return center(theme.Panel.Width(pw).Render(b.String()), w, h)
