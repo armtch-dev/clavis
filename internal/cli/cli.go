@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"golang.org/x/term"
@@ -202,6 +203,50 @@ func VaultReset(w io.Writer, r io.Reader, configDir string) error {
 	for _, p := range store.Profiles {
 		fmt.Fprintf(w, "  - %s (%s@%s)\n", p.Name, p.User, p.Host)
 	}
+	return nil
+}
+
+// Uninstall removes clavis completely: the config dir (vault, profiles,
+// scripts, machine-local secrets, the sync repo clone), the macOS Keychain
+// entry, and the binary itself. A synced remote repository is deliberately
+// left alone — it's the user's encrypted backup. exe may be empty (tests):
+// binary removal is skipped.
+func Uninstall(w io.Writer, r io.Reader, configDir, exe string) error {
+	fmt.Fprintln(w, "WARNING: this permanently removes clavis and ALL saved data on this machine:")
+	fmt.Fprintf(w, "  - %s (vault, profiles, scripts, machine-local secrets, sync repo)\n", configDir)
+	if runtime.GOOS == "darwin" {
+		fmt.Fprintln(w, "  - the master-key entry in the macOS Keychain (if cached)")
+	}
+	if exe != "" {
+		fmt.Fprintf(w, "  - the clavis binary at %s\n", exe)
+	}
+	fmt.Fprintln(w, "A synced GitHub repository is NOT touched — if you ever synced, your")
+	fmt.Fprintln(w, "encrypted config survives there and can be restored with your master key.")
+	fmt.Fprint(w, `Type "uninstall" to confirm: `)
+
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("reading confirmation: %w", err)
+	}
+	if strings.TrimSpace(line) != "uninstall" {
+		return errors.New("uninstall aborted: confirmation text did not match")
+	}
+
+	vault.DeleteFromKeychain()
+	if err := os.RemoveAll(configDir); err != nil {
+		return fmt.Errorf("removing %s: %w", configDir, err)
+	}
+	fmt.Fprintf(w, "removed %s\n", configDir)
+	if exe != "" {
+		// Unlinking the running binary is fine on unix; the process keeps
+		// its already-mapped image until exit.
+		if err := os.Remove(exe); err != nil {
+			fmt.Fprintf(w, "could not remove the binary (%v) — remove it manually:\n  sudo rm %s\n", err, exe)
+		} else {
+			fmt.Fprintf(w, "removed %s\n", exe)
+		}
+	}
+	fmt.Fprintln(w, "clavis is uninstalled.")
 	return nil
 }
 
