@@ -77,6 +77,28 @@ To rotate the master key (generate a new one and re-encrypt all secrets):
 
 Everyone syncing from that repository must receive the updated `vault.meta` and re-encrypted files before they can unlock. Out-of-sync vaults are detected at unlock time (canary check).
 
+## Hardware-Gated Local Unlock
+
+The master key is the only thing that decrypts the vault, on any machine.
+Hardware unlock never replaces it — it gates local copies of it:
+
+- **macOS Keychain (Touch ID)**: opting in to the keychain cache stores the
+  key in the login keychain; every read is gated by a device-owner
+  authentication prompt (Touch ID, Apple Watch, or account password). This is
+  a UI-level gate, not a cryptographic binding — the item still lives in the
+  login keychain. In a session with no auth UI (SSH), the gate fails closed
+  and clavis falls back to the interactive key prompt.
+- **FIDO2 security key (YubiKey etc., macOS and Linux)**: enrolling in
+  settings creates a credential with the hmac-secret extension and stores the
+  master key in `local/master-key.fido2.age`, encrypted to a secret that only
+  an assertion against that physical key (with touch) can re-derive. The
+  metadata in `local/fido2.json` (credential ID, salt) is non-secret. Both
+  files live in `local/`, which never syncs. Requires the `fido2-tools`
+  CLI (`brew install libfido2` / `apt install fido2-tools`).
+
+Losing the enrolled hardware loses nothing: the pasted master key always
+works, and re-enrolling mints a fresh wrapped copy.
+
 ## The Sync Guard
 
 ### Allowlist

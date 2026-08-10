@@ -284,6 +284,24 @@ func (c *Client) Sync(msg string) error {
 	return err
 }
 
+// Bootstrap points the config dir at an existing remote and makes the local
+// tree match origin/main — the fresh-machine restore path. reset --hard (not
+// clone: the dir may already hold local files; not pull: nothing to rebase)
+// so fetched tracked files win over anything local.
+func (c *Client) Bootstrap(url string) error {
+	if err := c.EnsureRepo(); err != nil {
+		return err
+	}
+	if err := c.SetRemote(url); err != nil {
+		return err
+	}
+	if _, err := c.git("fetch", "origin", DefaultBranch); err != nil {
+		return err
+	}
+	_, err := c.git("reset", "--hard", "origin/"+DefaultBranch)
+	return err
+}
+
 func (c *Client) Pull() error {
 	_, err := c.git("pull", "--rebase", "origin", DefaultBranch)
 	return err

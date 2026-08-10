@@ -39,7 +39,7 @@ func newTestModel(t *testing.T) *Model {
 		t.Fatal(err)
 	}
 	scripts, _ := script.LoadStore(dir)
-	m := New(dir, cfg, store, scripts, v, "")
+	m := New(dir, cfg, store, scripts, v)
 	t.Cleanup(m.Close)
 	return m
 }

@@ -151,6 +151,15 @@ func (v *Vault) Unlocked() bool    { return v.identity != nil }
 func (v *Vault) Recipient() string { return v.recipient.String() }
 func (v *Vault) Lock()             { v.identity = nil }
 
+// Identity returns the unlocked identity string — for wrapping into a
+// hardware-gated local copy (keychain, security key), never for display.
+func (v *Vault) Identity() (string, error) {
+	if v.identity == nil {
+		return "", ErrLocked
+	}
+	return v.identity.String(), nil
+}
+
 // Put encrypts and stores a synced secret. Works while locked.
 func (v *Vault) Put(name string, secret []byte) error { return v.put(v.Dir, name, secret) }
 

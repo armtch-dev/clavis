@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/armtch-dev/clavis/internal/config"
+	"github.com/armtch-dev/clavis/internal/fido2"
 	"github.com/armtch-dev/clavis/internal/gitsync"
 	"github.com/armtch-dev/clavis/internal/theme"
 	"github.com/armtch-dev/clavis/internal/vault"
@@ -15,26 +16,59 @@ import (
 // --- unlock screen ---
 
 type unlockModel struct {
-	v     *vault.Vault
-	input textinput.Model
-	errs  string
+	v        *vault.Vault
+	input    textinput.Model
+	errs     string
+	fidoBusy bool // assertion in flight — waiting for a key touch
+	fido     bool // a security key is enrolled and the tools are present
 }
 
-func newUnlock(v *vault.Vault) unlockModel {
-	ti := textinput.New()
-	ti.Prompt = "› "
-	ti.PromptStyle = theme.Accent
-	ti.Cursor.Style = theme.Accent
-	ti.EchoMode = textinput.EchoPassword
-	ti.Placeholder = "AGE-SECRET-KEY-…"
-	ti.Focus()
-	return unlockModel{v: v, input: ti}
+// fidoUnlockMsg carries the identity recovered from a security-key assertion.
+type fidoUnlockMsg struct {
+	identity string
+	err      error
+}
+
+// fidoEnrollMsg reports settings-screen enroll/remove completion.
+type fidoEnrollMsg struct{ err error }
+
+func newUnlock(v *vault.Vault, cfgDir string) unlockModel {
+	return unlockModel{
+		v:     v,
+		input: newTextInput("AGE-SECRET-KEY-…", true),
+		fido:  fido2.Available() && fido2.Enrolled(cfgDir),
+	}
 }
 
 func (m *Model) updateUnlock(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if fm, ok := msg.(fidoUnlockMsg); ok {
+		m.unlock.fidoBusy = false
+		if fm.err == nil {
+			fm.err = m.vault.Unlock(fm.identity)
+		}
+		if fm.err != nil {
+			m.unlock.errs = fm.err.Error()
+			return m, nil
+		}
+		m.screen = scrList
+		m.setStatus(statusOK, "vault unlocked via security key")
+		return m, nil
+	}
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
+	}
+	if m.unlock.fidoBusy {
+		return m, nil
+	}
+	if key.Type == tea.KeyTab && m.unlock.fido {
+		m.unlock.fidoBusy = true
+		m.unlock.errs = ""
+		dir := m.cfgDir
+		return m, func() tea.Msg {
+			id, err := fido2.Unlock(dir)
+			return fidoUnlockMsg{id, err}
+		}
 	}
 	switch key.Type {
 	case tea.KeyEsc:
@@ -64,11 +98,18 @@ func (u unlockModel) view(w, h int) string {
 	b.WriteString(theme.Title.Render("Unlock vault") + "\n\n")
 	b.WriteString(theme.Dim.Render("Paste your master key to decrypt stored credentials.") + "\n\n")
 	b.WriteString(u.input.View() + "\n")
+	if u.fidoBusy {
+		b.WriteString("\n" + theme.Accent.Render("touch your security key…") + "\n")
+	}
 	if u.errs != "" {
 		b.WriteString("\n" + theme.StatusErr.Render("✗ "+u.errs) + "\n")
 	}
 	b.WriteString("\n" + theme.Divider(50) + "\n")
-	b.WriteString(hintKeys([][2]string{{"enter", "unlock"}, {"esc", "browse locked"}}) + "\n")
+	hints := [][2]string{{"enter", "unlock"}, {"esc", "browse locked"}}
+	if u.fido {
+		hints = append(hints, [2]string{"tab", "security key"})
+	}
+	b.WriteString(hintKeys(hints) + "\n")
 	b.WriteString(theme.Hint.Render("lost the key?  clavis vault reset"))
 	return center(theme.Panel.Width(56).Render(b.String()), w, h)
 }
@@ -119,7 +160,7 @@ func (k keyBannerModel) view(w, h int) string {
 	b.WriteString(theme.Accent.Render(k.identity) + "\n\n")
 	b.WriteString(theme.Divider(64) + "\n")
 	if k.saved {
-		b.WriteString(theme.StatusOK.Render("✓ cached in macOS Keychain (auto-unlock on this Mac)") + "\n")
+		b.WriteString(theme.StatusOK.Render("✓ cached in macOS Keychain (Touch ID unlocks on this Mac)") + "\n")
 	} else {
 		b.WriteString(hintKeys([][2]string{{"k", "also cache in macOS Keychain"}}) + "\n")
 	}
@@ -145,7 +186,7 @@ type settingsModel struct {
 	input   textinput.Model
 	errs    string
 	login   string // validated GitHub login
-	busy    bool
+	busy    string // in-flight work notice; "" when idle
 	pending string // repo name awaiting creation confirm
 	token   string // pending token, stored only after GitHub validates it
 }
@@ -165,16 +206,7 @@ func newSettings(app *Model) *settingsModel {
 }
 
 func (s *settingsModel) textStep(step sstep, placeholder string, masked bool) {
-	ti := textinput.New()
-	ti.Prompt = "› "
-	ti.PromptStyle = theme.Accent
-	ti.Cursor.Style = theme.Accent
-	ti.Placeholder = placeholder
-	if masked {
-		ti.EchoMode = textinput.EchoPassword
-	}
-	ti.Focus()
-	s.input = ti
+	s.input = newTextInput(placeholder, masked)
 	s.step = step
 	s.errs = ""
 }
@@ -183,8 +215,17 @@ func (m *Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 	s := m.settings
 
 	switch msg := msg.(type) {
+	case fidoEnrollMsg:
+		s.busy = ""
+		if msg.err != nil {
+			s.errs = truncErr(msg.err)
+		} else {
+			m.setStatus(statusOK, "security key enrolled — tab on the unlock screen uses it")
+		}
+		return m, nil
+
 	case tokenCheckedMsg:
-		s.busy = false
+		s.busy = ""
 		if msg.err != nil {
 			s.token = ""
 			s.errs = msg.err.Error()
@@ -203,7 +244,7 @@ func (m *Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case repoCreatedMsg:
-		s.busy = false
+		s.busy = ""
 		if msg.err != nil {
 			s.errs = msg.err.Error()
 			s.step = sMenu
@@ -223,7 +264,7 @@ func (m *Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) settingsKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := m.settings
-	if s.busy {
+	if s.busy != "" {
 		return m, nil
 	}
 
@@ -246,6 +287,27 @@ func (m *Model) settingsKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				vault.DeleteFromKeychain()
 			}
 			m.cfg.Save(m.cfgDir)
+		case "f":
+			if !fido2.Available() {
+				s.errs = "fido2 tools not found — brew install libfido2 (or apt install fido2-tools)"
+				return m, nil
+			}
+			if fido2.Enrolled(m.cfgDir) {
+				if err := fido2.Remove(m.cfgDir); err != nil {
+					s.errs = err.Error()
+				} else {
+					m.setStatus(statusInfo, "security-key unlock removed")
+				}
+				return m, nil
+			}
+			id, err := m.vault.Identity()
+			if err != nil {
+				s.errs = "vault is locked — unlock first to enroll a security key"
+				return m, nil
+			}
+			s.busy = "touch your security key…"
+			dir := m.cfgDir
+			return m, func() tea.Msg { return fidoEnrollMsg{fido2.Enroll(dir, id)} }
 		case "s":
 			return m, m.syncCmd("manual sync")
 		}
@@ -260,7 +322,7 @@ func (m *Model) settingsKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				s.errs, s.step = err.Error(), sMenu
 				return m, nil
 			}
-			s.busy = true
+			s.busy = "talking to GitHub…"
 			name := s.pending
 			return m, func() tea.Msg {
 				url, err := gitsync.CreateGitHubRepo(token, name, "clavis encrypted SSH vault")
@@ -285,7 +347,7 @@ func (m *Model) settingsKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			s.token = val
-			s.busy = true
+			s.busy = "talking to GitHub…"
 			return m, func() tea.Msg {
 				login, err := gitsync.ValidateToken(val)
 				return tokenCheckedMsg{login, err}
@@ -356,14 +418,15 @@ func (s *settingsModel) view(w, h int) string {
 		row("u", "use existing repo URL", remote)
 		row("c", "create new private repo", "")
 		row("a", "autosync on every change", onOff(cfg.Sync.AutoSync))
-		row("k", "cache master key in Keychain", onOff(cfg.KeychainOptIn))
+		row("k", "cache master key in Keychain (Touch ID gated)", onOff(cfg.KeychainOptIn))
+		row("f", "security-key unlock (FIDO2)", onOff(fido2.Enrolled(s.app.cfgDir)))
 		row("s", "sync now", "")
 	}
 	if s.errs != "" {
 		b.WriteString("\n" + theme.StatusErr.Render("✗ "+s.errs) + "\n")
 	}
-	if s.busy {
-		b.WriteString("\n" + theme.Accent.Render("talking to GitHub…") + "\n")
+	if s.busy != "" {
+		b.WriteString("\n" + theme.Accent.Render(s.busy) + "\n")
 	}
 	b.WriteString("\n" + theme.Divider(dw) + "\n" + theme.Hint.Render("esc back"))
 	return center(theme.Panel.Width(inner).Render(b.String()), w, h)

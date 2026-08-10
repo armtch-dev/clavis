@@ -148,6 +148,43 @@ func TestStagedGuardRejectsSymlink(t *testing.T) {
 	}
 }
 
+func TestBootstrapRestoresFromRemote(t *testing.T) {
+	// Source machine: vault + profile, pushed to a local bare "remote".
+	src, v := newRepo(t)
+	if err := v.Put("host.password", []byte("hunter2")); err != nil {
+		t.Fatal(err)
+	}
+	bare := t.TempDir()
+	if _, err := src.git("init", "--bare", "-b", DefaultBranch, bare); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.SetRemote(bare); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.Sync("initial"); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	// Fresh machine: empty config dir, Bootstrap, expect the files back.
+	fresh := New(t.TempDir(), "fake-token")
+	if err := fresh.Bootstrap(bare); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	for _, f := range []string{"vault.meta", "profiles.json", filepath.Join("vault", "host.password.age")} {
+		if _, err := os.Stat(filepath.Join(fresh.Dir, f)); err != nil {
+			t.Errorf("after Bootstrap, %s missing: %v", f, err)
+		}
+	}
+	// And the restored vault must load with the source's recipient.
+	rv, err := vault.Load(fresh.Dir)
+	if err != nil {
+		t.Fatalf("vault.Load after Bootstrap: %v", err)
+	}
+	if rv.Recipient() != v.Recipient() {
+		t.Errorf("restored recipient %q != source %q", rv.Recipient(), v.Recipient())
+	}
+}
+
 func TestSanitizeScrubsToken(t *testing.T) {
 	got := sanitize("fatal: auth failed for https://ghp_SECRET@github.com", "ghp_SECRET")
 	if strings.Contains(got, "ghp_SECRET") {

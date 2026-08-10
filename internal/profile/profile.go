@@ -41,7 +41,7 @@ type Profile struct {
 	// the host lives in the list.
 	Category string   `json:"category,omitempty"`
 	Tags     []string `json:"tags,omitempty"`
-	Notes     string     `json:"notes,omitempty"`
+	Notes    string   `json:"notes,omitempty"`
 	// HostKeyFP is the pinned SHA256 fingerprint recorded on first successful
 	// connection (TOFU). A later mismatch triggers a loud MITM warning.
 	HostKeyFP string `json:"host_key_fp,omitempty"`
