@@ -329,10 +329,11 @@ func (m *Model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (c confirmModel) view(w, h int) string {
-	box := theme.Panel.Width(min(46, w-2)).Render(
+	pw := min(46, w-2)
+	box := theme.Panel.Width(pw).Render(
 		theme.StatusErr.Render("Delete "+c.name) + "\n\n" +
 			theme.Value.Render("Its password and key will be removed from the vault.") + "\n\n" +
-			theme.Divider(40) + "\n" +
+			theme.Divider(pw-6) + "\n" +
 			hintKeys([][2]string{{"y", "delete"}, {"esc", "cancel"}}))
 	return center(box, w, h)
 }
@@ -422,8 +423,9 @@ func (m *Model) viewList() string {
 	vis := m.visible()
 	var b strings.Builder
 
-	// Header: title on the left, quiet meta on the right.
-	left := pad + theme.Title.Render("clavis")
+	// Header: title on the left, quiet meta on the right. The key glyph is
+	// the app's mark — it earns its cell as identity in the fixed chrome.
+	left := pad + theme.Title.Render(theme.IconKey+" clavis")
 	if m.catTarget != "" {
 		name := ""
 		if p := m.store.ByID(m.catTarget); p != nil {
@@ -442,7 +444,9 @@ func (m *Model) viewList() string {
 			theme.Dim.Render(fmt.Sprintf("  %d/%d", len(vis), len(m.store.Profiles)))
 	}
 	var meta []string
-	if m.sortMode != sortDefault {
+	// The sort indicator lives on the ping column (colHeader); repeat it here
+	// only when the column header row is hidden, so the state stays visible.
+	if m.sortMode != sortDefault && !l.showColHead {
 		meta = append(meta, theme.Dim.Render("sort ")+theme.Sub.Render(m.sortMode.String()))
 	}
 	if n := len(m.store.Profiles); n > 0 {
@@ -781,9 +785,13 @@ func relDur(d time.Duration) string {
 // for hairlines only.
 func (m *Model) colHeader(l listLayout) string {
 	h := theme.Dim
+	ping := "ping"
+	if m.sortMode == sortLatency {
+		ping = "ping ▼" // the indicator sits on the column it sorts
+	}
 	cells := []string{
 		" ",
-		h.Width(6).Align(lipgloss.Right).Render("ping"),
+		h.Width(6).Align(lipgloss.Right).Render(ping),
 	}
 	if l.showSpark {
 		cells = append(cells, h.Width(l.sparkW).Render("trend"))
@@ -826,7 +834,13 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 		cells = append(cells, lipgloss.NewStyle().Width(l.sparkW).Render(sparkline(st.History, l.sparkW)))
 	}
 
-	cells = append(cells, theme.Value.Width(l.nameW).Render(truncTo(p.Name, l.nameW)))
+	// Bold on the selected name: the typographic weight reverse-video would
+	// give, on the cell the eye lands on.
+	nameStyle := theme.Value
+	if selected {
+		nameStyle = nameStyle.Bold(true)
+	}
+	cells = append(cells, nameStyle.Width(l.nameW).Render(truncTo(p.Name, l.nameW)))
 
 	target := fmt.Sprintf("%s@%s", p.User, p.Host)
 	if p.Port != 22 {
@@ -992,30 +1006,54 @@ func center(s string, w, h int) string {
 func (m *Model) viewHelp() string {
 	pw := clamp(m.width-8, 44, 68)
 	dw := pw - 6
-	rows := [][2]string{
-		{"enter", "connect to the selected host"},
-		{"r", "run a script on the selected host (only ones that apply)"},
-		{"m", "manage the script library (create, edit, delete)"},
-		{"a", "add a profile (step-by-step wizard)"},
-		{"e", "edit the selected profile"},
-		{"d", "delete the selected profile and its vault secrets"},
-		{"t", "test the connection (dial, handshake, auth, exec)"},
-		{"s", "sync now (guarded, encrypted git push)"},
-		{"g", "settings — GitHub token, repo, autosync, keychain"},
-		{"i", "import hosts from ~/.ssh/config"},
-		{"c", "set the selected host's category (list grouping)"},
-		{"o", "toggle latency ordering within groups"},
-		{"/", "filter profiles"},
-		{"u", "unlock the vault (when locked)"},
-		{"j k ↑ ↓", "move"},
-		{"pgup pgdn", "page up / down (also ctrl+u / ctrl+d)"},
-		{"home end G", "jump to top / bottom"},
-		{"q", "quit"},
+	sections := []struct {
+		name string
+		rows [][2]string
+	}{
+		{"connect", [][2]string{
+			{"enter", "connect to the selected host"},
+			{"t", "test the connection (dial, handshake, auth, exec)"},
+			{"r", "run a script (only ones that apply)"},
+			{"m", "manage the script library"},
+		}},
+		{"organize", [][2]string{
+			{"a", "add a profile (step-by-step wizard)"},
+			{"e", "edit the selected profile"},
+			{"d", "delete the profile and its vault secrets"},
+			{"c", "set the host's category (list grouping)"},
+			{"i", "import hosts from ~/.ssh/config"},
+			{"o", "toggle latency ordering within groups"},
+			{"/", "filter profiles"},
+		}},
+		{"vault & sync", [][2]string{
+			{"u", "unlock the vault (when locked)"},
+			{"s", "sync now (guarded, encrypted git push)"},
+			{"g", "settings — token, repo, autosync, keychain"},
+		}},
+		{"navigate", [][2]string{
+			{"j k ↑ ↓", "move"},
+			{"pgup pgdn", "page up / down (also ctrl+u / ctrl+d)"},
+			{"home end G", "jump to top / bottom"},
+			{"q", "quit"},
+		}},
+	}
+	// Blank separators only when the terminal is tall enough for them —
+	// the overlay is clipped from the bottom, and losing rows costs more
+	// than losing breathing space.
+	sep := "\n"
+	if m.height < 32 {
+		sep = ""
 	}
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Keys") + "\n\n")
-	for _, r := range rows {
-		b.WriteString("  " + theme.Accent.Width(11).Render(r[0]) + theme.Value.Render(r[1]) + "\n")
+	for i, sec := range sections {
+		if i > 0 {
+			b.WriteString(sep)
+		}
+		b.WriteString(theme.Hint.Render(sec.name) + "\n")
+		for _, r := range sec.rows {
+			b.WriteString("  " + theme.Accent.Width(11).Render(r[0]) + theme.Value.Render(r[1]) + "\n")
+		}
 	}
 	b.WriteString("\n" + theme.Divider(dw) + "\n")
 	dot := func(c lipgloss.Color) string { return lipgloss.NewStyle().Foreground(c).Render(theme.IconUp) }

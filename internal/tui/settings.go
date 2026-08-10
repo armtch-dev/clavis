@@ -98,6 +98,7 @@ func (m *Model) updateUnlock(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (u unlockModel) view(spin string, w, h int) string {
+	pw := min(56, w-2) // panel width; dividers must track it or they wrap inside
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Unlock vault") + "\n\n")
 	b.WriteString(theme.Dim.Render("Paste your master key to decrypt stored credentials.") + "\n\n")
@@ -108,14 +109,14 @@ func (u unlockModel) view(spin string, w, h int) string {
 	if u.errs != "" {
 		b.WriteString("\n" + theme.StatusErr.Render("✗ "+u.errs) + "\n")
 	}
-	b.WriteString("\n" + theme.Divider(50) + "\n")
+	b.WriteString("\n" + theme.Divider(pw-6) + "\n")
 	hints := [][2]string{{"enter", "unlock"}, {"esc", "browse locked"}}
 	if u.fido {
 		hints = append(hints, [2]string{"tab", "security key"})
 	}
 	b.WriteString(hintKeys(hints) + "\n")
 	b.WriteString(theme.Hint.Render("lost the key?  clavis vault reset"))
-	return center(theme.Panel.Width(min(56, w-2)).Render(b.String()), w, h)
+	return center(theme.Panel.Width(pw).Render(b.String()), w, h)
 }
 
 // --- first-run key banner ---
@@ -151,6 +152,7 @@ func (m *Model) updateFirstRun(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (k keyBannerModel) view(w, h int) string {
+	pw := min(70, w-2)
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Master key") + theme.Dim.Render("   shown only once") + "\n\n")
 	b.WriteString(theme.Value.Render("Everything in the vault is encrypted to this key. clavis does not") + "\n")
@@ -158,14 +160,14 @@ func (k keyBannerModel) view(w, h int) string {
 	b.WriteString(theme.Value.Render("manager, printed, a USB stick. Lose it and stored credentials") + "\n")
 	b.WriteString(theme.Value.Render("cannot be recovered, only reset.") + "\n\n")
 	b.WriteString(theme.Accent.Render(k.identity) + "\n\n")
-	b.WriteString(theme.Divider(64) + "\n")
+	b.WriteString(theme.Divider(pw-6) + "\n")
 	if k.saved {
 		b.WriteString(theme.StatusOK.Render("✓ cached in macOS Keychain (Touch ID unlocks on this Mac)") + "\n")
 	} else if runtime.GOOS == "darwin" {
 		b.WriteString(hintKeys([][2]string{{"k", "also cache in macOS Keychain"}}) + "\n")
 	}
 	b.WriteString(hintKeys([][2]string{{"enter", "I stored it safely — continue"}}))
-	return center(theme.Panel.Width(min(70, w-2)).Render(b.String()), w, h)
+	return center(theme.Panel.Width(pw).Render(b.String()), w, h)
 }
 
 // --- settings screen ---

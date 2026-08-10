@@ -187,6 +187,7 @@ func (m *Model) welcomeKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (w *welcomeModel) view(spin string, width, h int) string {
+	pw := min(62, width-2)
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Welcome to clavis") + "\n\n")
 	switch w.step {
@@ -211,11 +212,11 @@ func (w *welcomeModel) view(spin string, width, h int) string {
 	if w.busy {
 		b.WriteString("\n" + spin + theme.Accent.Render(" fetching…") + "\n")
 	}
-	b.WriteString("\n" + theme.Divider(56) + "\n")
+	b.WriteString("\n" + theme.Divider(pw-6) + "\n")
 	if w.step == wChoice {
 		b.WriteString(hintKeys([][2]string{{"n", "new vault"}, {"r", "restore"}, {"q", "quit"}}))
 	} else {
 		b.WriteString(hintKeys([][2]string{{"enter", "continue"}, {"esc", "back"}}))
 	}
-	return center(theme.Panel.Width(min(62, width-2)).Render(b.String()), width, h)
+	return center(theme.Panel.Width(pw).Render(b.String()), width, h)
 }
