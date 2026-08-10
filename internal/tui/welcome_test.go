@@ -53,8 +53,9 @@ func TestWelcomeRestoreFlow(t *testing.T) {
 	dir := t.TempDir()
 	cfg, _ := config.Load(dir)
 	store, _ := profile.LoadStore(dir)
+	idents, _ := profile.LoadIdentities(dir)
 	scripts, _ := script.LoadStore(dir)
-	m := New(dir, cfg, store, scripts, nil)
+	m := New(dir, cfg, store, idents, scripts, nil)
 	t.Cleanup(m.Close)
 	if m.screen != scrWelcome {
 		t.Fatalf("nil vault should land on welcome, got screen %d", m.screen)

@@ -34,12 +34,13 @@ func newTestModel(t *testing.T) *Model {
 	dir := t.TempDir()
 	cfg, _ := config.Load(dir)
 	store, _ := profile.LoadStore(dir)
+	idents, _ := profile.LoadIdentities(dir)
 	v, _, err := vault.Init(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	scripts, _ := script.LoadStore(dir)
-	m := New(dir, cfg, store, scripts, v)
+	m := New(dir, cfg, store, idents, scripts, v)
 	t.Cleanup(m.Close)
 	return m
 }

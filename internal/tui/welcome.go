@@ -103,11 +103,15 @@ func (m *Model) reloadFetched() error {
 	if err != nil {
 		return err
 	}
+	idents, err := profile.LoadIdentities(m.cfgDir)
+	if err != nil {
+		return err
+	}
 	scripts, err := script.LoadStore(m.cfgDir)
 	if err != nil {
 		return err
 	}
-	m.vault, m.cfg, m.store, m.scripts = v, cfg, store, scripts
+	m.vault, m.cfg, m.store, m.idents, m.scripts = v, cfg, store, idents, scripts
 	m.syncTargets()
 	return nil
 }

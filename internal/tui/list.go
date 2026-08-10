@@ -231,6 +231,9 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "m":
 		m.scriptsUI = newScriptsManager(m)
 		m.screen = scrScripts
+	case "y":
+		m.identsUI = &identsModel{}
+		m.screen = scrIdentities
 	case "enter":
 		if p := m.selected(vis); p != nil && m.connecting == "" {
 			return m, m.startConnect(*p)
@@ -805,6 +808,7 @@ func (m *Model) colHeader(l listLayout) string {
 }
 
 func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string {
+	p = m.effective(p) // identity-backed rows show the identity's user + auth
 	st, have := m.statuses[p.ID]
 
 	dotColor, dot, latency := theme.Muted, theme.IconIdle, "     ·"
@@ -1027,6 +1031,7 @@ func (m *Model) viewHelp() string {
 		}},
 		{"vault & sync", [][2]string{
 			{"u", "unlock the vault (when locked)"},
+			{"y", "identities — reusable credentials for many hosts"},
 			{"s", "sync now (guarded, encrypted git push)"},
 			{"g", "settings — token, repo, autosync, keychain"},
 		}},
