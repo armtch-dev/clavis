@@ -2,7 +2,7 @@
 
 An SSH connection manager with an encrypted credential vault, live reachability probes, and guarded encrypted git sync.
 
-Clavis walks you through a step-by-step profile wizard to record SSH hosts. It keeps all passwords and private keys in an age-encrypted vault locked by a master key you generate once and store offline. When you add a profile, it immediately tests the connection so you know it works. Clavis watches your hosts with live TCP reachability probes every 10 seconds—status dots show latency at a glance, colored green for <50ms, yellow for <200ms, red for slower, or a hollow circle if the host is down. Sync to a private GitHub repository is encrypted and guarded: a plaintext secret will never accidentally leak into git. The UI uses the Night Owl palette, the same dark theme as scriptorium, and you can import your existing ~/.ssh/config in one keystroke.
+Clavis walks you through a step-by-step profile wizard to record SSH hosts. It keeps all passwords and private keys in an age-encrypted vault locked by a master key you generate once and store offline. When you add a profile, it immediately tests the connection so you know it works. Clavis watches your hosts with live TCP reachability probes every 15 seconds—status dots show latency at a glance, colored green for <50ms, yellow for <200ms, red for slower, or a hollow circle if the host is down. Sync to a private GitHub repository is encrypted and guarded: a plaintext secret will never accidentally leak into git. The UI uses the Night Owl palette, the same dark theme as scriptorium, and you can import your existing ~/.ssh/config in one keystroke.
 
 <img src="docs/tui.png" alt="The clavis profile list: live latency dots, sparkline trends, tags, and a detail pane for the selected host" width="1397">
 
@@ -166,7 +166,7 @@ On the profile list, each row shows:
 - **Latency**: The most recent round-trip time to the SSH port, or "down"
 - **Sparkline**: A mini chart of the last 12 probe results; failures show as `×`
 
-Probes run every 10 seconds to the SSH port (a TCP dial, not ICMP ping) so they work on any network and require no root.
+Probes run every 15 seconds to the SSH port (a TCP dial, not ICMP ping) so they work on any network and require no root.
 
 ## Environment Variables
 

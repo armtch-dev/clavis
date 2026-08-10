@@ -321,6 +321,16 @@ func (m *Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// Terminal citizenship, on every screen: ctrl+c always quits cleanly,
+		// ctrl+z always suspends — no screen may shadow either.
+		switch msg.String() {
+		case "ctrl+c":
+			m.quiting = true
+			m.monitor.Stop()
+			return m, tea.Quit
+		case "ctrl+z":
+			return m, tea.Suspend
+		}
 		if m.help {
 			m.help = false
 			return m, nil
@@ -590,6 +600,10 @@ func (m *Model) Close() { m.monitor.Stop() }
 func (m *Model) View() string {
 	if m.quiting {
 		return ""
+	}
+	// Below the floor every row wraps and the frame tears — say so instead.
+	if m.width > 0 && (m.width < 40 || m.height < 8) {
+		return center(theme.Dim.Render("terminal too small — need 40×8"), m.width, m.height)
 	}
 	bodyH := max(m.height-m.footerHeight(), 1)
 	var body string

@@ -109,10 +109,6 @@ func (m *Model) reloadFetched() error {
 
 func (m *Model) welcomeKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	w := m.welcome
-	if key.String() == "ctrl+c" {
-		m.quiting = true
-		return m, tea.Quit
-	}
 	if w.busy {
 		return m, nil
 	}
@@ -126,7 +122,7 @@ func (m *Model) welcomeKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.vault = v
-			m.firstRun = newKeyBanner(id, m.cfg, m.cfgDir)
+			m.firstRun = newKeyBanner(id)
 			m.screen = scrFirstRun
 		case "r", "R":
 			w.textStep(wURL, "https://github.com/you/clavis-vault.git", false)

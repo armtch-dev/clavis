@@ -6,7 +6,6 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/armtch-dev/clavis/internal/config"
 	"github.com/armtch-dev/clavis/internal/fido2"
 	"github.com/armtch-dev/clavis/internal/gitsync"
 	"github.com/armtch-dev/clavis/internal/theme"
@@ -118,13 +117,11 @@ func (u unlockModel) view(w, h int) string {
 
 type keyBannerModel struct {
 	identity string
-	cfg      *config.Config
-	cfgDir   string
 	saved    bool // user pressed k (keychain)
 }
 
-func newKeyBanner(identity string, cfg *config.Config, cfgDir string) keyBannerModel {
-	return keyBannerModel{identity: identity, cfg: cfg, cfgDir: cfgDir}
+func newKeyBanner(identity string) keyBannerModel {
+	return keyBannerModel{identity: identity}
 }
 
 func (m *Model) updateFirstRun(msg tea.Msg) (tea.Model, tea.Cmd) {

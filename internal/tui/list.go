@@ -115,9 +115,7 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEnter:
 			m.filtering = false
 		case tea.KeyBackspace:
-			if len(m.filter) > 0 {
-				m.filter = m.filter[:len(m.filter)-1]
-			}
+			m.filter = trimLastRune(m.filter)
 		case tea.KeyRunes:
 			m.filter += string(key.Runes)
 		}
@@ -145,9 +143,7 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.catTarget, m.catInput = "", ""
 		case tea.KeyBackspace:
-			if len(m.catInput) > 0 {
-				m.catInput = m.catInput[:len(m.catInput)-1]
-			}
+			m.catInput = trimLastRune(m.catInput)
 		case tea.KeyRunes:
 			m.catInput += string(key.Runes)
 		}
@@ -156,7 +152,7 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	vis := m.visible()
 	switch key.String() {
-	case "q", "ctrl+c":
+	case "q":
 		m.quiting = true
 		m.monitor.Stop()
 		return m, tea.Quit
@@ -168,6 +164,16 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cursor < len(vis)-1 {
 			m.cursor++
 		}
+	case "pgup", "ctrl+u":
+		m.cursor = max(m.cursor-10, 0)
+	case "pgdown", "ctrl+d":
+		if len(vis) > 0 {
+			m.cursor = min(m.cursor+10, len(vis)-1)
+		}
+	case "home":
+		m.cursor = 0
+	case "end", "G":
+		m.cursor = max(len(vis)-1, 0)
 	case "g":
 		m.settings = newSettings(m)
 		m.screen = scrSettings
@@ -707,6 +713,16 @@ func (m *Model) groupHeading(name string, vis []profile.Profile, l listLayout) s
 	return ansi.Truncate(b.String(), l.listW-1, "")
 }
 
+// trimLastRune removes the final rune (not byte — multibyte input must not
+// be corrupted by backspace).
+func trimLastRune(s string) string {
+	r := []rune(s)
+	if len(r) == 0 {
+		return s
+	}
+	return string(r[:len(r)-1])
+}
+
 // truncTo shortens s to at most w runes with an ellipsis.
 func truncTo(s string, w int) string {
 	if w < 2 {
@@ -801,19 +817,13 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 		cells = append(cells, lipgloss.NewStyle().Width(l.sparkW).Render(sparkline(st.History, l.sparkW)))
 	}
 
-	name := p.Name
-	if len(name) > l.nameW {
-		name = name[:l.nameW-1] + "…"
-	}
-	cells = append(cells, theme.Value.Width(l.nameW).Render(name))
+	cells = append(cells, theme.Value.Width(l.nameW).Render(truncTo(p.Name, l.nameW)))
 
 	target := fmt.Sprintf("%s@%s", p.User, p.Host)
 	if p.Port != 22 {
 		target += fmt.Sprintf(":%d", p.Port)
 	}
-	if len(target) > l.endW {
-		target = target[:l.endW-1] + "…"
-	}
+	target = truncTo(target, l.endW)
 	// Subtle, not Muted: the target is real data, a step above chrome.
 	cells = append(cells, theme.Sub.Width(l.endW).Render(target))
 

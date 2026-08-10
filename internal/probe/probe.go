@@ -59,7 +59,7 @@ type Monitor struct {
 	wg     sync.WaitGroup
 }
 
-// New creates a monitor. interval is the probe period (production: 10s),
+// New creates a monitor. interval is the probe period (production: 15s),
 // timeout the per-dial timeout (production: 3s). notify is called after every
 // probe, from the probing goroutine — it must be safe for concurrent calls.
 func New(interval, timeout time.Duration, notify func(Status)) *Monitor {

@@ -34,7 +34,6 @@ const (
 
 type Settings struct {
 	Remote   string `json:"remote,omitempty"`
-	Branch   string `json:"branch,omitempty"`
 	AutoSync bool   `json:"auto_sync"`
 }
 
