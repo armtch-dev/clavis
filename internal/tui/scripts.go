@@ -85,6 +85,7 @@ func (s *scriptsModel) openEditor(sc *script.Script) {
 	ti.Prompt = "› "
 	ti.PromptStyle = theme.Accent
 	ti.TextStyle = theme.Value
+	ti.PlaceholderStyle = theme.Dim // bubbles' fixed-grey default ignores the theme
 	ti.Cursor.Style = theme.Accent
 	ti.Placeholder = "script name"
 
@@ -92,12 +93,15 @@ func (s *scriptsModel) openEditor(sc *script.Script) {
 	tg.Prompt = "› "
 	tg.PromptStyle = theme.Accent
 	tg.TextStyle = theme.Value
+	tg.PlaceholderStyle = theme.Dim
 	tg.Cursor.Style = theme.Accent
 	tg.Placeholder = "tags (space-separated; empty = any host)"
 
 	ta := textarea.New()
 	ta.Placeholder = "#!/usr/bin/env bash\n…type or paste the script here…"
 	ta.ShowLineNumbers = false
+	ta.FocusedStyle.Placeholder = theme.Dim
+	ta.BlurredStyle.Placeholder = theme.Dim
 	ta.SetWidth(clamp(s.app.width-16, 28, 72))
 	ta.SetHeight(clamp(s.app.height-17, 4, 14))
 	ta.CharLimit = 0

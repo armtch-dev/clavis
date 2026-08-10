@@ -111,6 +111,8 @@ func (w *wizardModel) setStep(s wstep) {
 			ta.Placeholder = "leave empty and press ctrl+d to keep the stored key,\nor paste a replacement here"
 		}
 		ta.ShowLineNumbers = false
+		ta.FocusedStyle.Placeholder = theme.Dim
+		ta.BlurredStyle.Placeholder = theme.Dim
 		ta.SetWidth(clamp(w.app.width-16, 28, 64))
 		ta.SetHeight(clamp(w.app.height-14, 5, 9))
 		ta.CharLimit = 0
@@ -126,6 +128,7 @@ func (w *wizardModel) setStep(s wstep) {
 	ti.Prompt = "› "
 	ti.PromptStyle = theme.Accent
 	ti.TextStyle = theme.Value
+	ti.PlaceholderStyle = theme.Dim // bubbles' fixed-grey default ignores the theme
 	ti.Cursor.Style = theme.Accent
 	ti.Focus()
 	switch s {

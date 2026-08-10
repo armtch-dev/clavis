@@ -42,10 +42,15 @@ type welcomeModel struct {
 type restoreFetchedMsg struct{ err error }
 
 // newTextInput is the shared prompt style for settings and welcome inputs.
+// PlaceholderStyle must be set explicitly: bubbles defaults it to a fixed
+// dark grey (ANSI 240) that ignores the theme and vanishes on non-dark
+// backgrounds — theme.Dim follows the palette fallback instead.
 func newTextInput(placeholder string, masked bool) textinput.Model {
 	ti := textinput.New()
 	ti.Prompt = "› "
 	ti.PromptStyle = theme.Accent
+	ti.TextStyle = theme.Value
+	ti.PlaceholderStyle = theme.Dim
 	ti.Cursor.Style = theme.Accent
 	ti.Placeholder = placeholder
 	if masked {
