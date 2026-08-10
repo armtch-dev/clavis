@@ -177,6 +177,11 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "g":
 		m.settings = newSettings(m)
 		m.screen = scrSettings
+	case "u":
+		if !m.vault.Unlocked() {
+			m.unlock = newUnlock(m.vault, m.cfgDir)
+			m.screen = scrUnlock
+		}
 	case "/":
 		m.filtering = true
 		m.filter = ""
@@ -260,7 +265,7 @@ func (m *Model) importSSHConfig() {
 		m.setStatus(statusErr, "import: "+err.Error())
 		return
 	}
-	added, skipped := 0, 0
+	added, skipped, keyless := 0, 0, 0
 	for _, e := range entries {
 		if m.store.ByName(e.Alias) != nil {
 			skipped++
@@ -280,14 +285,18 @@ func (m *Model) importSSHConfig() {
 			skipped++
 			continue
 		}
-		if e.IdentityFile != "" {
-			if raw, err := os.ReadFile(e.IdentityFile); err == nil {
-				m.vault.Put(np.KeySecret(), raw)
-			}
+		if raw, rerr := os.ReadFile(e.IdentityFile); e.IdentityFile != "" && rerr == nil {
+			m.vault.Put(np.KeySecret(), raw)
+		} else {
+			keyless++ // no IdentityFile, or unreadable — profile works once a key is added via edit
 		}
 		added++
 	}
-	m.setStatus(statusOK, fmt.Sprintf("imported %d host(s), skipped %d (duplicate/invalid)", added, skipped))
+	msg := fmt.Sprintf("imported %d host(s), skipped %d (duplicate/invalid)", added, skipped)
+	if keyless > 0 {
+		msg += fmt.Sprintf(", %d without keys (add via e)", keyless)
+	}
+	m.setStatus(statusOK, msg)
 }
 
 // --- confirm delete ---
@@ -320,7 +329,7 @@ func (m *Model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (c confirmModel) view(w, h int) string {
-	box := theme.Panel.Width(46).Render(
+	box := theme.Panel.Width(min(46, w-2)).Render(
 		theme.StatusErr.Render("Delete "+c.name) + "\n\n" +
 			theme.Value.Render("Its password and key will be removed from the vault.") + "\n\n" +
 			theme.Divider(40) + "\n" +
@@ -997,13 +1006,16 @@ func (m *Model) viewHelp() string {
 		{"c", "set the selected host's category (list grouping)"},
 		{"o", "toggle latency ordering within groups"},
 		{"/", "filter profiles"},
+		{"u", "unlock the vault (when locked)"},
 		{"j k ↑ ↓", "move"},
+		{"pgup pgdn", "page up / down (also ctrl+u / ctrl+d)"},
+		{"home end G", "jump to top / bottom"},
 		{"q", "quit"},
 	}
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Keys") + "\n\n")
 	for _, r := range rows {
-		b.WriteString("  " + theme.Accent.Width(9).Render(r[0]) + theme.Value.Render(r[1]) + "\n")
+		b.WriteString("  " + theme.Accent.Width(11).Render(r[0]) + theme.Value.Render(r[1]) + "\n")
 	}
 	b.WriteString("\n" + theme.Divider(dw) + "\n")
 	dot := func(c lipgloss.Color) string { return lipgloss.NewStyle().Foreground(c).Render(theme.IconUp) }

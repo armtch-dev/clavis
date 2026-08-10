@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/armtch-dev/clavis/internal/profile"
@@ -234,6 +235,17 @@ func (m *Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		w.setStep(w.prev(w.step))
 		return m, nil
+	}
+
+	// Editing: ctrl+s saves right here with the current step committed —
+	// a one-field change shouldn't cost a walk through every step.
+	// (Safe to bind: raw mode disables XON/XOFF flow control.)
+	if key.Type == tea.KeyCtrlS && w.editing && w.step != stepTest {
+		if err := w.commitStep(); err != nil {
+			w.errs = err.Error()
+			return m, nil
+		}
+		return w.save(m)
 	}
 
 	// Choice steps take single keys. When editing, enter keeps the current
@@ -491,6 +503,15 @@ func (w *wizardModel) updateTest(m *Model, key tea.KeyMsg) (tea.Model, tea.Cmd) 
 }
 
 func (w *wizardModel) save(m *Model) (tea.Model, tea.Cmd) {
+	// Rebuild Auth from the current answers here (not only in startTest):
+	// the ctrl+s quick-save path never runs the test step.
+	w.draft.Auth = nil
+	if w.usePassword {
+		w.draft.Auth = append(w.draft.Auth, profile.AuthPassword)
+	}
+	if w.useKey {
+		w.draft.Auth = append(w.draft.Auth, profile.AuthKey)
+	}
 	var saved *profile.Profile
 	var err error
 	if w.editing {
@@ -516,6 +537,10 @@ func (w *wizardModel) save(m *Model) (tea.Model, tea.Cmd) {
 		m.vault.Put(saved.KeySecret(), w.keyPEM)
 		if w.passphrase != "" {
 			m.vault.Put(saved.PassphraseSecret(), []byte(w.passphrase))
+		} else if !w.keyNeedsPassphrase {
+			// The new key is unprotected — a passphrase left over from a
+			// previously stored key would be stale ciphertext.
+			m.vault.Delete(saved.PassphraseSecret())
 		}
 	}
 	if !w.useKey {
@@ -582,10 +607,11 @@ func (w *wizardModel) view(width, height int) string {
 	}
 
 	if w.errs != "" {
-		b.WriteString("\n\n" + theme.StatusErr.Render("✗ "+w.errs))
+		b.WriteString("\n\n" + ansi.Truncate(theme.StatusErr.Render("✗ "+w.errs), dw, "…"))
 	}
 	b.WriteString("\n\n" + theme.Divider(dw))
-	b.WriteString("\n" + w.footer())
+	// Clip, don't wrap: a wrapped footer breaks the panel's height budget.
+	b.WriteString("\n" + ansi.Truncate(w.footer(), dw, "…"))
 
 	return center(theme.Panel.Width(inner).Render(b.String()), width, height)
 }
@@ -616,24 +642,31 @@ func (w *wizardModel) progress(width int) string {
 }
 
 func (w *wizardModel) footer() string {
+	var s string
 	switch w.step {
 	case stepUsePassword, stepUseKey:
 		if w.editing {
-			return theme.Hint.Render("choose a key · enter keep current · esc back")
+			s = "choose a key · enter keep current · esc back"
+		} else {
+			s = "choose a key · esc back"
 		}
-		return theme.Hint.Render("choose a key · esc back")
 	case stepKeySource:
 		if w.hasStoredKey() {
-			return theme.Hint.Render("choose a key · enter keep stored · esc back")
+			s = "choose a key · enter keep stored · esc back"
+		} else {
+			s = "choose a key · esc back"
 		}
-		return theme.Hint.Render("choose a key · esc back")
 	case stepKeyPaste:
-		return theme.Hint.Render("ctrl+d save key · esc back")
+		s = "ctrl+d save key · esc back"
 	case stepTest:
 		return "" // test screen prints its own actions
 	default:
-		return theme.Hint.Render("enter next · esc back")
+		s = "enter next · esc back"
 	}
+	if w.editing {
+		s += " · ctrl+s save now"
+	}
+	return theme.Hint.Render(s)
 }
 
 func (w *wizardModel) viewTest() string {
