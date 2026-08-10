@@ -12,7 +12,7 @@ The add-profile wizard asks one question at a time; a pasted private key is encr
 
 ## Install
 
-macOS and Linux (needs git, Go 1.26+, and the OpenSSH client). One line:
+macOS and Linux (needs git, Go 1.26+, and the OpenSSH client — the installer offers to install anything missing via your package manager, with confirmation). One line:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/armtch-dev/clavis/main/install.sh | bash
