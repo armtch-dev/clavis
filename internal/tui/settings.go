@@ -422,7 +422,7 @@ func (s *settingsModel) view(w, h int) string {
 	}
 	dw := inner - 6
 	var b strings.Builder
-	b.WriteString(theme.Title.Render(theme.IconGear+" Settings") + theme.Dim.Render("   git sync") + "\n\n")
+	b.WriteString(theme.Title.Render(theme.IconGear+" Settings") + theme.Dim.Render("   sync & unlock") + "\n\n")
 
 	switch s.step {
 	case sToken, sRemoteURL, sRepoName:
@@ -461,7 +461,7 @@ func (s *settingsModel) view(w, h int) string {
 		row("c", "create new private repo", "")
 		row("a", "autosync on every change", onOff(cfg.Sync.AutoSync))
 		if runtime.GOOS == "darwin" {
-			row("k", "cache master key in Keychain (Touch ID gated)", onOff(vault.HasKeychain()))
+			row("k", "Keychain unlock (Touch ID)", onOff(vault.HasKeychain()))
 		}
 		row("f", "security-key unlock (FIDO2)", onOff(fido2.Enrolled(s.app.cfgDir)))
 		row("s", "sync now", "")

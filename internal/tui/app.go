@@ -705,22 +705,22 @@ func (m *Model) View() string {
 
 // footerHeight mirrors viewStatusBar's line count so views can size themselves.
 func (m *Model) footerHeight() int {
-	h := 1 // divider
-	if m.statusMsg != "" || m.syncing {
-		h++
+	if m.statusMsg != "" || m.syncing || (m.screen == scrList && !m.help) {
+		return 2 // divider + the shared status/legend line
 	}
-	if m.screen == scrList && !m.help {
-		h++ // key legend
-	}
-	return h
+	return 1
 }
 
+// viewStatusBar renders the footer: a hairline, then one shared line — the
+// ephemeral status message while one is showing (it fades on its TTL), the
+// key legend otherwise. One line of chrome, never a stack.
 func (m *Model) viewStatusBar() string {
 	width := max(m.width, 40)
 	pad := strings.Repeat(" ", m.layoutList().pad)
 	lines := []string{theme.Divider(width)}
 
-	if m.statusMsg != "" || m.syncing {
+	switch {
+	case m.statusMsg != "" || m.syncing:
 		style := theme.Dim
 		switch m.statusType {
 		case statusOK:
@@ -736,11 +736,8 @@ func (m *Model) viewStatusBar() string {
 			style = theme.Accent
 		}
 		lines = append(lines, pad+style.MaxWidth(width-len(pad)-1).Render(msg))
-	}
-
-	if m.screen == scrList && !m.help {
-		// Tinted like the header bar so both read as anchored chrome.
-		lines = append(lines, chromeFill(pad+m.legend(width-2*len(pad)), width))
+	case m.screen == scrList && !m.help:
+		lines = append(lines, pad+m.legend(width-2*len(pad)))
 	}
 	return strings.Join(lines, "\n")
 }

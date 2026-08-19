@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
 	"github.com/armtch-dev/clavis/internal/probe"
@@ -125,16 +126,16 @@ func TestSelectionFillNotTorn(t *testing.T) {
 	}
 }
 
-// chromeFill (header/footer chrome tint) must emit exactly `width` cells —
-// clipping over-wide input, padding short input — and re-open the surface
-// background after every per-cell reset, like selFill.
-func TestChromeFillWidth(t *testing.T) {
+// bgFill (the mechanic under the selection fill) must emit exactly `width`
+// cells — clipping over-wide input, padding short input — and re-open the
+// background after every per-cell reset.
+func TestBgFillWidth(t *testing.T) {
 	old := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	defer lipgloss.SetColorProfile(old)
 
 	const reset = "\x1b[0m"
-	marker := lipgloss.NewStyle().Background(theme.Surface).Render("|")
+	marker := lipgloss.NewStyle().Background(theme.SelBg).Render("|")
 	seq := marker[:strings.Index(marker, "|")]
 	if seq == "" {
 		t.Fatal("no background sequence produced under TrueColor profile")
@@ -146,20 +147,47 @@ func TestChromeFillWidth(t *testing.T) {
 		in string
 		w  int
 	}{{short, 40}, {long, 40}, {"", 12}} {
-		out := chromeFill(tc.in, tc.w)
+		out := bgFill(tc.in, tc.w, theme.SelBg)
 		if got := lipgloss.Width(out); got != tc.w {
-			t.Errorf("chromeFill(%q, %d) width = %d", tc.in, tc.w, got)
+			t.Errorf("bgFill(%q, %d) width = %d", tc.in, tc.w, got)
 		}
 	}
-	out := chromeFill(short, 40)
+	out := bgFill(short, 40, theme.SelBg)
 	body := strings.TrimSuffix(out, reset)
 	if n, m := strings.Count(body, reset), strings.Count(body, reset+seq); n != m {
-		t.Errorf("%d of %d inner resets re-open the chrome background", m, n)
+		t.Errorf("%d of %d inner resets re-open the fill background", m, n)
 	}
 }
 
 // The fleet summary strip: segments appear only when they apply, and the
 // whole strip disappears when there is nothing to say.
+// The footer is one shared line under the divider: the legend normally, the
+// ephemeral status message while one is showing — never both stacked.
+func TestFooterSingleLine(t *testing.T) {
+	m := newTestModel(t)
+	m.screen = scrList
+	m.width, m.height = 100, 30
+
+	if got := m.footerHeight(); got != 2 {
+		t.Fatalf("footerHeight = %d, want 2 (divider + one line)", got)
+	}
+	if bar := ansi.Strip(m.viewStatusBar()); !strings.Contains(bar, "connect") {
+		t.Fatal("idle footer should show the key legend")
+	}
+
+	m.setStatus(statusOK, "synced to origin")
+	if got := m.footerHeight(); got != 2 {
+		t.Fatalf("footerHeight with status = %d, want 2 — status shares the line", got)
+	}
+	bar := ansi.Strip(m.viewStatusBar())
+	if !strings.Contains(bar, "synced to origin") {
+		t.Fatal("status message missing from footer")
+	}
+	if strings.Contains(bar, "connect") {
+		t.Fatal("legend should yield to the status message, not stack under it")
+	}
+}
+
 func TestFleetSummary(t *testing.T) {
 	m := newTestModel(t)
 	m.width, m.height = 100, 30
