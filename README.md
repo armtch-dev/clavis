@@ -39,15 +39,15 @@ clavis
 On first launch a welcome screen offers two paths:
 
 - **`n` — new vault**: generates your master key and shows it once—it looks like `AGE-SECRET-KEY-1…`. Press `c` to copy it to the clipboard for pasting into a password manager (then clear the clipboard), and store it somewhere outside this machine. Clavis will never write the master key to disk.
-- **`r` — restore**: setting up a machine you already have a clavis repo for? Paste the repo URL and a GitHub token, clavis fetches your encrypted config, then paste the master key from your original setup to unlock it. Profiles, scripts, settings, and credentials all come back; the token is stored encrypted on this machine only.
+- **`r` — restore**: setting up a machine you already have a clavis repo for? Paste the repo URL and a GitHub token, clavis fetches your encrypted config, then paste the master key from your original setup to unlock it. Profiles, scripts, settings, and credentials all come back; the token is stored encrypted on this machine only. After that one unlock, clavis offers to set up local auth so you never paste the key here again: caching it in the Keychain on macOS, or enrolling a connected FIDO2 security key elsewhere.
 
 On subsequent runs, clavis prompts you to unlock the vault. It tries three non-interactive sources first:
 
 1. `CLAVIS_KEY` environment variable (for scripts and CI)
 2. `CLAVIS_KEY_FILE` environment variable (path to a file holding the master key)
-3. macOS Keychain (opt-in via settings; each read is gated by Touch ID / Apple Watch / password)
+3. macOS Keychain (opt-in; each read is gated by Touch ID / Apple Watch / password)
 
-If none of those work, you'll see an interactive prompt. On the prompt, `tab` unlocks with an enrolled FIDO2 security key instead of pasting.
+If none of those work and a FIDO2 security key is enrolled and plugged in, the unlock assertion starts by itself — touch the key and you're in. Otherwise you'll see an interactive prompt, where `tab` triggers the security-key unlock manually.
 
 To cache the key in your login keychain (macOS only), press `k` on the first-run key screen, or unlock the vault once and toggle it in settings (`g`, then `k`). Reads are Touch ID-gated, but the key does move onto the machine; you decide.
 

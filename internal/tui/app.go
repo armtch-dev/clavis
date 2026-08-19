@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/armtch-dev/clavis/internal/config"
+	"github.com/armtch-dev/clavis/internal/fido2"
 	"github.com/armtch-dev/clavis/internal/gitsync"
 	"github.com/armtch-dev/clavis/internal/probe"
 	"github.com/armtch-dev/clavis/internal/profile"
@@ -149,6 +150,10 @@ func New(cfgDir string, cfg *config.Config, store *profile.Store, idents *profil
 			}
 		}
 		m.unlock = newUnlock(v, cfgDir)
+		// Launch parity with the Keychain path: security key enrolled and
+		// plugged in → the assertion starts by itself (Init issues it), and
+		// the unlock screen shows the touch prompt.
+		m.unlock.fidoBusy = m.unlock.fido && fido2.Present()
 		m.screen = scrUnlock
 	default:
 		m.screen = scrList
@@ -225,6 +230,9 @@ func waitForProbe(ch chan probe.Status) tea.Cmd {
 }
 
 func (m *Model) Init() tea.Cmd {
+	if m.screen == scrUnlock && m.unlock.fidoBusy {
+		return tea.Batch(waitForProbe(m.probeCh), m.fidoUnlockCmd())
+	}
 	return waitForProbe(m.probeCh)
 }
 
