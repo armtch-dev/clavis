@@ -14,7 +14,7 @@ import (
 
 // detailTier controls graceful degradation of the detail card when the pane
 // is short: the chart goes first, then the tiny section labels, then the
-// hairlines between blocks, and last the fingerprint's two-line wrap (a
+// blank lines between blocks, and last the fingerprint's two-line wrap (a
 // clipped fingerprint is worse than a mid-truncated one).
 type detailTier struct {
 	chart  bool
@@ -33,7 +33,7 @@ func (m *Model) renderDetail(p *profile.Profile, l listLayout, avail int) string
 	avail = max(avail, 1)
 	pane := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(theme.Border).
+		BorderForeground(theme.Faint).
 		Padding(0, 2).
 		Width(l.detailW).
 		Height(avail).
@@ -74,8 +74,8 @@ func (m *Model) detailLines(p *profile.Profile, cw int, t detailTier) []string {
 		statusBadge(st, have, p.ProxyJump != ""),
 	}
 	section := func(name string) {
-		if t.rules {
-			lines = append(lines, theme.Divider(cw))
+		if t.rules { // "rules" tier now buys breathing room, not hairlines
+			lines = append(lines, "")
 		}
 		if t.labels {
 			lines = append(lines, theme.Hint.Render(name))

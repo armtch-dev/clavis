@@ -426,9 +426,9 @@ func (m *Model) viewList() string {
 	vis := m.visible()
 	var b strings.Builder
 
-	// Header: title on the left, quiet meta on the right. The key glyph is
-	// the app's mark — it earns its cell as identity in the fixed chrome.
-	left := pad + theme.Title.Render(theme.IconKey+" clavis")
+	// Header: the app chip on the left, quiet meta on the right. The chip is
+	// the one background-filled mark in the chrome — identity, not a bar.
+	left := pad + theme.ChipAccent.Render(theme.IconKey+" clavis")
 	if m.catTarget != "" {
 		name := ""
 		if p := m.store.ByID(m.catTarget); p != nil {
@@ -452,23 +452,19 @@ func (m *Model) viewList() string {
 	if m.sortMode != sortDefault && !l.showColHead {
 		meta = append(meta, theme.Dim.Render("sort ")+theme.Sub.Render(m.sortMode.String()))
 	}
+	// Up counts, averages, and the remote live in the fleet strip — the
+	// header keeps only what must stay glanceable from the top: size,
+	// trouble, and vault state.
 	if n := len(m.store.Profiles); n > 0 {
-		up, down := 0, 0
+		down := 0
 		for _, p := range m.store.Profiles {
-			if st, ok := m.statuses[p.ID]; ok {
-				if st.Reachable {
-					up++
-				} else {
-					down++
-				}
+			if st, ok := m.statuses[p.ID]; ok && !st.Reachable {
+				down++
 			}
 		}
 		count := fmt.Sprintf("%d host", n)
 		if n != 1 {
 			count += "s"
-		}
-		if up > 0 {
-			count = fmt.Sprintf("%s · %d up", count, up)
 		}
 		meta = append(meta, theme.Dim.Render(count))
 		// A down host can scroll out of view on a long list — keep the fact
@@ -478,10 +474,7 @@ func (m *Model) viewList() string {
 		}
 	}
 	if !m.vault.Unlocked() {
-		meta = append(meta, theme.StatusWarn.Render(theme.IconLock+" locked"))
-	}
-	if m.cfg.Sync.Remote != "" {
-		meta = append(meta, theme.Dim.Render(theme.IconSync+" ")+theme.Value.Render(shortRemote(m.cfg.Sync.Remote)))
+		meta = append(meta, theme.ChipWarn.Render(theme.IconLock+" locked"))
 	}
 	// The meta side must never push the header past the terminal width: an
 	// overflowing line wraps, shifting the whole frame down a row. Drop
@@ -492,10 +485,7 @@ func (m *Model) viewList() string {
 		lipgloss.Width(left)+lipgloss.Width(strings.Join(meta, sep)+pad)+1 > l.width {
 		meta = meta[1:]
 	}
-	// The tinted bar is the header's frame — no divider underneath, the line
-	// is reclaimed for the row region.
-	header := spread(left, strings.Join(meta, sep)+pad, l.width)
-	b.WriteString(chromeFill(header, l.width) + "\n")
+	b.WriteString(spread(left, strings.Join(meta, sep)+pad, l.width) + "\n")
 	headerH := 1
 	if l.roomy {
 		b.WriteString("\n")
@@ -518,14 +508,16 @@ func (m *Model) viewList() string {
 	}
 
 	region := strings.TrimRight(m.renderRowRegion(vis, l, avail), "\n")
-	// Fleet summary strip: ambient totals anchored to the bottom of the
-	// content area, rendered only when at least 3 spare lines remain (a
-	// breathing line + hairline + summary) so tight frames never pay for it.
+	// Fleet summary strip: ambient totals anchored just above the footer,
+	// rendered only when at least 3 spare lines remain (breathing room +
+	// summary) so tight frames never pay for it. No hairline of its own —
+	// the footer's divider right below already separates it, and two rules
+	// a row apart read as double chrome.
 	strip := m.fleetSummary(l)
 	showStrip := strip != "" && avail-lipgloss.Height(region) >= 3
 	contentH := avail
 	if showStrip {
-		contentH = avail - 2 // hairline + summary live in the reclaimed rows
+		contentH = avail - 1 // the summary line lives in the reclaimed row
 	}
 	var content string
 	if l.showDetail {
@@ -538,7 +530,6 @@ func (m *Model) viewList() string {
 	if showStrip {
 		gap := contentH - lipgloss.Height(content) // pad so the strip hugs the footer
 		b.WriteString(strings.Repeat("\n", max(gap, 0)+1))
-		b.WriteString(theme.Divider(l.width) + "\n")
 		b.WriteString(strip)
 	}
 	return b.String()
@@ -667,9 +658,9 @@ func (m *Model) renderRowRegion(vis []profile.Profile, l listLayout, avail int) 
 	return b.String()
 }
 
-// groupHeading renders a category section header as a full-width rule that
-// carries data: `─ cloud · 2 hosts · 2 up ───────`, the dashes filling the
-// remaining row width exactly. Counts come from the group's visible rows.
+// groupHeading renders a category section header as a quiet data line:
+// `cloud · 2 hosts · 2 up` — whitespace does the separating, no rule fill.
+// Counts come from the group's visible rows.
 func (m *Model) groupHeading(name string, vis []profile.Profile, l listLayout) string {
 	total, up, down := 0, 0, 0
 	for _, p := range vis {
@@ -697,10 +688,9 @@ func (m *Model) groupHeading(name string, vis []profile.Profile, l listLayout) s
 		downSeg = fmt.Sprintf("%d down", down)
 	}
 
-	lead := strings.Repeat(" ", max(l.pad-1, 0))
-	budget := max(l.listW-len(lead)-1, 10)
+	lead := strings.Repeat(" ", max(l.pad-1, 0)) + "  "
+	budget := max(l.listW-lipgloss.Width(lead)-1, 10)
 
-	// Plain widths first so the dash fill lands exactly on the budget.
 	sep := " · "
 	plainW := lipgloss.Width(sep + hosts)
 	if upSeg != "" {
@@ -709,21 +699,16 @@ func (m *Model) groupHeading(name string, vis []profile.Profile, l listLayout) s
 	if downSeg != "" {
 		plainW += lipgloss.Width(sep + downSeg)
 	}
-	name = truncTo(name, max(budget-plainW-6, 4)) // 6: rule prefix + min tail
-	fill := budget - 2 - lipgloss.Width(name) - plainW - 1
+	name = truncTo(name, max(budget-plainW, 4))
 
 	var b strings.Builder
-	b.WriteString(lead + theme.Hint.Render("─ "))
-	b.WriteString(theme.Sub.Render(name))
+	b.WriteString(lead + theme.Sub.Render(name))
 	b.WriteString(theme.Dim.Render(sep + hosts))
 	if upSeg != "" {
 		b.WriteString(theme.Dim.Render(sep) + theme.StatusOK.Render(upSeg))
 	}
 	if downSeg != "" {
 		b.WriteString(theme.Dim.Render(sep) + theme.StatusErr.Render(downSeg))
-	}
-	if fill > 0 {
-		b.WriteString(theme.Hint.Render(" " + strings.Repeat("─", fill)))
 	}
 	// Safety net: the width invariant is load-bearing (overflow wraps the frame).
 	return ansi.Truncate(b.String(), l.listW-1, "")
@@ -913,13 +898,6 @@ func selFill(line string, width int) string {
 	return bgFill(line, width, theme.SelBg)
 }
 
-// chromeFill tints the fixed chrome bars (header, footer legend) with the
-// theme surface colour, exactly `width` cells wide — same reset-survival
-// mechanics as selFill.
-func chromeFill(line string, width int) string {
-	return bgFill(line, width, theme.Surface)
-}
-
 // bgFill clips/pads line to exactly width cells and paints bg underneath,
 // re-opening the background SGR after every per-cell reset (see selFill).
 func bgFill(line string, width int, bg lipgloss.Color) string {
@@ -956,10 +934,11 @@ var sparkBlocks = []rune("▁▂▃▄▅▆")
 var sparkFail = lipgloss.NewStyle().
 	Foreground(lipgloss.Color(theme.BlendHex(theme.HexRed, theme.HexBg, 0.35)))
 
-// sparkline renders the last n latency samples as a gradient trend: every
-// sample takes its own latency-band colour (green → yellow → red), failures
-// show as a dim red ╳. With fewer than 3 valid samples a lone block would
-// read as data where there is none — render a dim ⋯ placeholder instead.
+// sparkline renders the last n latency samples as an ambient monochrome
+// trend — the shape carries the information; the latency band is already
+// encoded twice on the row (dot colour, ping cell), a third voice here was
+// noise. Failures show as a dim red ╳. With fewer than 3 valid samples a
+// lone block would read as data where there is none — a dim ⋯ instead.
 func sparkline(hist []float64, n int) string {
 	if len(hist) > n {
 		hist = hist[len(hist)-n:]
@@ -986,7 +965,7 @@ func sparkline(hist []float64, n int) string {
 		if maxV > 0 {
 			idx = int(v / maxV * float64(len(sparkBlocks)-1))
 		}
-		b.WriteString(lipgloss.NewStyle().Foreground(theme.LatencyColor(v)).Render(string(sparkBlocks[idx])))
+		b.WriteString(theme.Spark.Render(string(sparkBlocks[idx])))
 	}
 	for i := len(hist); i < n; i++ {
 		b.WriteString(" ")

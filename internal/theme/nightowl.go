@@ -66,18 +66,11 @@ var (
 	BrCyan   = lipgloss.Color(HexBrCyan)
 	Border   = lipgloss.Color(HexBorder)
 
-	// CardBg sits just above the bg — same 4.5% blend toward white scriptorium
-	// uses. Faint is a dimmer steel for dividers, hairlines, and whisper
-	// text; 25% toward the bg (not deeper) so it stays readable on
-	// terminals whose effective background is lighter than Night Owl's —
+	// Faint is a dimmer steel for dividers, hairlines, and whisper text;
+	// 25% toward the bg (not deeper) so it stays readable on terminals
+	// whose effective background is lighter than Night Owl's —
 	// translucent windows report a dark bg but composite much lighter.
-	CardBg = lipgloss.Color(BlendHex(HexBg, HexWhite, 0.045))
-	Faint  = lipgloss.Color(BlendHex(HexBorder, HexBg, 0.25))
-
-	// Surface is the fixed-chrome tint (header bar, footer legend): a step
-	// above CardBg — 7% toward white — so the bars read as anchored chrome
-	// without competing with the SelBg selection fill.
-	Surface = lipgloss.Color(BlendHex(HexBg, HexWhite, 0.07))
+	Faint = lipgloss.Color(BlendHex(HexBorder, HexBg, 0.25))
 
 	// Subtle sits between Fg and Muted: secondary *data* (host column, dates,
 	// header meta) — a step brighter than Muted, which is reserved for chrome
@@ -103,6 +96,16 @@ var (
 //     the terminal's own ANSI palette, which its theme guarantees is
 //     legible against itself.
 func Init() {
+	// CLAVIS_BG declares the background the query can't see — the tmux case,
+	// where truecolor *rendering* passes through fine and only the OSC query
+	// dies at the multiplexer. One env var restores the designed look.
+	if hint := os.Getenv("CLAVIS_BG"); len(hint) == 7 && hint[0] == '#' {
+		if hint == HexBg {
+			return
+		}
+		rebase(hint)
+		return
+	}
 	// tmux/screen sit between us and the real terminal and don't answer the
 	// query — skipping straight to the fallback also avoids stalling launch
 	// on termenv's multi-second OSC timeout.
@@ -137,7 +140,6 @@ func ansiFallback() {
 	Muted = lipgloss.Color("8") // "bright black": every theme's designed muted tone
 	Border, SelBg = Muted, Muted
 	Subtle, Faint, SparkDim = Muted, Muted, Muted
-	CardBg, Surface = lipgloss.Color(""), lipgloss.Color("") // no chrome tint
 
 	Title = lipgloss.NewStyle().Foreground(Cyan).Bold(true)
 	Label = lipgloss.NewStyle().Foreground(Blue)
@@ -153,33 +155,42 @@ func ansiFallback() {
 	SelTick = lipgloss.NewStyle().Foreground(Cyan)
 	Chip = lipgloss.NewStyle().Foreground(Muted)
 	Tag = lipgloss.NewStyle().Foreground(Blue)
-	Panel = Panel.BorderForeground(Border)
+	ChipAccent = ChipAccent.Foreground(lipgloss.Color("0")).Background(Cyan)
+	ChipWarn = ChipWarn.Foreground(lipgloss.Color("0")).Background(Yellow)
+	Panel = Panel.BorderForeground(Muted)
 }
 
-// rebase recomputes every bg-relative tint (and the styles built on them)
-// against the given background hex. On dark backgrounds the tiers blend the
-// Night Owl steels toward the bg as before; on light-ish backgrounds
-// (translucent windows, pastel themes) the low tiers must darken AWAY from
-// the bg instead — a near-bg steel that whispers on navy is invisible on
-// lavender.
+// rebase recomputes the whole neutral ramp (and the styles built on it)
+// against the given background hex. The Night Owl constants (teal-grey
+// Muted, steel Faint) only harmonize with navy — on any other background
+// the ramp must be re-derived from the background itself, or the dim tiers
+// read as mud. On dark backgrounds the ramp blends the foreground toward
+// the bg; on light-ish backgrounds (translucent windows, pastel themes) it
+// darkens away from the bg instead.
 func rebase(bgHex string) {
 	dark := hexLum(bgHex) < 0.5
 	if dark {
-		CardBg = lipgloss.Color(BlendHex(bgHex, HexWhite, 0.045))
-		Surface = lipgloss.Color(BlendHex(bgHex, HexWhite, 0.07))
-		Faint = lipgloss.Color(BlendHex(HexBorder, bgHex, 0.25))
+		SelBg = lipgloss.Color(BlendHex(bgHex, HexWhite, 0.14))
 		Subtle = lipgloss.Color(BlendHex(HexFg, bgHex, 0.45))
-		SparkDim = lipgloss.Color(BlendHex(HexMuted, bgHex, 0.40))
+		Muted = lipgloss.Color(BlendHex(HexFg, bgHex, 0.62))
+		Faint = lipgloss.Color(BlendHex(HexFg, bgHex, 0.76))
+		SparkDim = lipgloss.Color(BlendHex(HexFg, bgHex, 0.70))
 	} else {
-		CardBg = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.045))
-		Surface = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.07))
-		Faint = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.40))
+		SelBg = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.14))
 		Subtle = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.60))
+		Muted = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.48))
+		Faint = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.40))
 		SparkDim = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.30))
 	}
 	Hint = Hint.Foreground(Faint)
 	Sub = Sub.Foreground(Subtle)
+	Dim = Dim.Foreground(Muted)
+	Chip = Chip.Foreground(Muted)
 	Spark = Spark.Foreground(SparkDim)
+	Panel = Panel.BorderForeground(Faint)
+	// Chips cut their text out of the declared background, whatever it is.
+	ChipAccent = ChipAccent.Foreground(lipgloss.Color(bgHex))
+	ChipWarn = ChipWarn.Foreground(lipgloss.Color(bgHex))
 }
 
 // hexLum is the perceived luminance of a #rrggbb colour, 0 (black) to 1.
@@ -213,10 +224,17 @@ var (
 	Chip = lipgloss.NewStyle().Foreground(Muted)
 	Tag  = lipgloss.NewStyle().Foreground(Blue)
 
-	// Panel is a flat modal container: square thin border, generous padding.
+	// ChipAccent / ChipWarn are the only background-filled chrome: small
+	// bold blocks (the app mark, the locked badge). Slabs of tint read as
+	// opaque patches on translucent terminals; a chip reads as a mark.
+	ChipAccent = lipgloss.NewStyle().Foreground(Bg).Background(BrCyan).Bold(true).Padding(0, 1)
+	ChipWarn   = lipgloss.NewStyle().Foreground(Bg).Background(BrYellow).Bold(true).Padding(0, 1)
+
+	// Panel is a modal container: rounded thin border in the faint steel —
+	// present enough to frame, quiet enough to disappear.
 	Panel = lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder()).
-		BorderForeground(Border).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(Faint).
 		Padding(1, 3)
 )
 
