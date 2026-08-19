@@ -163,6 +163,17 @@ func TestRemove(t *testing.T) {
 	}
 }
 
+func TestPresent(t *testing.T) {
+	fakes := installFakes(t)
+	if !Present() {
+		t.Fatal("Present() = false with a device listed")
+	}
+	writeFake(t, fakes, "fido2-token", "#!/bin/sh\nexit 0\n")
+	if Present() {
+		t.Fatal("Present() = true with no device connected")
+	}
+}
+
 func TestEnrollNoDevice(t *testing.T) {
 	fakes := installFakes(t)
 	writeFake(t, fakes, "fido2-token", "#!/bin/sh\nexit 0\n")

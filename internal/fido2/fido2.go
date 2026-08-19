@@ -57,6 +57,12 @@ func Available() bool {
 	return true
 }
 
+// Present reports whether a security key is currently connected.
+func Present() bool {
+	_, err := firstDevice()
+	return err == nil
+}
+
 // Enrolled reports whether this machine has a security-key enrollment.
 func Enrolled(configDir string) bool {
 	_, errM := os.Stat(metaPath(configDir))

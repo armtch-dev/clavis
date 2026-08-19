@@ -42,6 +42,16 @@ func newUnlock(v *vault.Vault, cfgDir string) unlockModel {
 	}
 }
 
+// fidoUnlockCmd asserts against the enrolled credential (blocks on a key
+// touch, so always off the UI thread as a command).
+func (m *Model) fidoUnlockCmd() tea.Cmd {
+	dir := m.cfgDir
+	return func() tea.Msg {
+		id, err := fido2.Unlock(dir)
+		return fidoUnlockMsg{id, err}
+	}
+}
+
 func (m *Model) updateUnlock(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if fm, ok := msg.(fidoUnlockMsg); ok {
 		m.unlock.fidoBusy = false
@@ -66,11 +76,7 @@ func (m *Model) updateUnlock(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Type == tea.KeyTab && m.unlock.fido {
 		m.unlock.fidoBusy = true
 		m.unlock.errs = ""
-		dir := m.cfgDir
-		return m, func() tea.Msg {
-			id, err := fido2.Unlock(dir)
-			return fidoUnlockMsg{id, err}
-		}
+		return m, m.fidoUnlockCmd()
 	}
 	switch key.Type {
 	case tea.KeyEsc:
