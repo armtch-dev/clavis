@@ -96,6 +96,9 @@ Hardware unlock never replaces it — it gates local copies of it:
   files live in `local/`, which never syncs. Requires the `fido2-tools`
   CLI (`brew install libfido2` / `apt install fido2-tools`).
 
+The two are mutually exclusive on a machine: enabling one in settings
+removes the other, so there is always exactly one local copy of the key.
+
 Losing the enrolled hardware loses nothing: the pasted master key always
 works, and re-enrolling mints a fresh wrapped copy.
 

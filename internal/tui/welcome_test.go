@@ -2,7 +2,6 @@ package tui
 
 import (
 	"os/exec"
-	"runtime"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -81,11 +80,13 @@ func TestWelcomeRestoreFlow(t *testing.T) {
 		t.Fatal("bogus key must not unlock")
 	}
 	typeInto(t, m, identity)
-	if runtime.GOOS == "darwin" {
-		// One-time Keychain offer follows the unlock; decline it here — a
-		// test must never write into the developer's real Keychain.
-		if m.welcome.step != wCache {
-			t.Fatalf("want Keychain offer after unlock, got step %d (screen %d)", m.welcome.step, m.screen)
+	// A one-time local-auth offer (Keychain or security-key enrollment,
+	// depending on OS and whether a real key is plugged in right now) may
+	// follow the unlock; decline it — a test must never write into the
+	// developer's real Keychain or onto a real security key.
+	if m.screen == scrWelcome {
+		if m.welcome.step != wCache && m.welcome.step != wEnroll {
+			t.Fatalf("want local-auth offer after unlock, got step %d", m.welcome.step)
 		}
 		m.dispatch(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
 	}
@@ -116,7 +117,7 @@ func TestRestoreOffer(t *testing.T) {
 		ok        bool
 	}{
 		{"darwin", false, wCache, true},
-		{"darwin", true, wCache, true}, // macOS offers the Keychain, never enrollment
+		{"darwin", true, wEnroll, true}, // a plugged-in security key beats the Keychain
 		{"linux", true, wEnroll, true},
 		{"linux", false, 0, false},
 	} {
