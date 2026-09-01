@@ -99,17 +99,38 @@ START=$(date +%s)
 SIZE="$(du -h "$SRC/$BIN" | cut -f1 | tr -d ' ')"
 ok "built in $(( $(date +%s) - START ))s (${SIZE} binary)"
 
-# Pick an install dir: /usr/local/bin if writable, else ~/.local/bin.
+# Update every clavis already on PATH (deduped, PATH order); a first install
+# picks /usr/local/bin if writable, else ~/.local/bin.
 say "installing"
-DEST="/usr/local/bin"
-if [ ! -w "$DEST" ]; then
-  dim "$DEST is not writable — using ~/.local/bin instead"
-  DEST="$HOME/.local/bin"
-  mkdir -p "$DEST"
+TARGETS=() UPDATE=""
+while IFS= read -r p; do
+  [ "$p" = "$SRC/$BIN" ] && continue # the build output itself, if $SRC is on PATH
+  TARGETS+=("$(dirname "$p")")
+done < <(type -aP "$BIN" 2>/dev/null | awk '!seen[$0]++' || true)
+if [ "${#TARGETS[@]}" -gt 0 ]; then
+  UPDATE=1
+else
+  DEST="/usr/local/bin"
+  if [ ! -w "$DEST" ]; then
+    dim "$DEST is not writable — using ~/.local/bin instead"
+    DEST="$HOME/.local/bin"
+    mkdir -p "$DEST"
+  fi
+  TARGETS=("$DEST")
 fi
-install -m 0755 "$SRC/$BIN" "$DEST/$BIN"
+for DEST in "${TARGETS[@]}"; do
+  if install -m 0755 "$SRC/$BIN" "$DEST/$BIN" 2>/dev/null; then
+    ok "$DEST/$BIN ($("$DEST/$BIN" version))"
+  else
+    warn "could not write $DEST/$BIN — left as is (re-run with sudo, or remove it)"
+  fi
+done
 [ -n "$CLEANUP" ] && rm -rf "$CLEANUP"
-ok "$DEST/$BIN ($("$DEST/$BIN" version))"
+if [ -n "$UPDATE" ]; then
+  rule
+  printf '%s✓ updated.%s\n' "$C_OK$C_BLD" "$C_OFF"
+  exit 0
+fi
 
 rule
 printf '%s✓ done.%s next steps:\n' "$C_OK$C_BLD" "$C_OFF"
