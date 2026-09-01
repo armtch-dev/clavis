@@ -18,6 +18,7 @@ macOS and Linux (needs git, Go 1.26+, and the OpenSSH client — the installer o
 curl -fsSL https://raw.githubusercontent.com/armtch-dev/clavis/main/install.sh | bash
 ```
 
+Re-running the same command updates every clavis already on your PATH.
 Installs to `/usr/local/bin` if writable, otherwise `~/.local/bin`. From a
 checkout, `./install.sh` does the same. Or manually:
 
