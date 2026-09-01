@@ -39,7 +39,7 @@ clavis
 On first launch a welcome screen offers two paths:
 
 - **`n` — new vault**: generates your master key and shows it once—it looks like `AGE-SECRET-KEY-1…`. Press `c` to copy it to the clipboard for pasting into a password manager (then clear the clipboard), and store it somewhere outside this machine. Clavis will never write the master key to disk.
-- **`r` — restore**: setting up a machine you already have a clavis repo for? Paste the repo URL and a GitHub token, clavis fetches your encrypted config, then paste the master key from your original setup to unlock it. Profiles, scripts, settings, and credentials all come back; the token is stored encrypted on this machine only. After that one unlock, clavis offers to set up local auth so you never paste the key here again: caching it in the Keychain on macOS, or enrolling a connected FIDO2 security key elsewhere.
+- **`r` — restore**: setting up a machine you already have a clavis repo for? Paste the repo URL and a GitHub token, clavis fetches your encrypted config, then paste the master key from your original setup to unlock it. Profiles, scripts, settings, and credentials all come back; the token is stored encrypted on this machine only. After that one unlock, clavis offers to set up local auth so you never paste the key here again: enrolling a FIDO2 security key if one is plugged in, or caching the key in the Keychain on macOS.
 
 On subsequent runs, clavis prompts you to unlock the vault. It tries three non-interactive sources first:
 
@@ -52,6 +52,8 @@ If none of those work and a FIDO2 security key is enrolled and plugged in, the u
 To cache the key in your login keychain (macOS only), press `k` on the first-run key screen, or unlock the vault once and toggle it in settings (`g`, then `k`). Reads are Touch ID-gated, but the key does move onto the machine; you decide.
 
 To unlock with a YubiKey or other FIDO2 security key (macOS and Linux): install the fido2 tools (`brew install libfido2` / `apt install fido2-tools`), unlock once, then enroll in settings (`g`, then `f`). The master key is stored on this machine encrypted to a secret only a touch of that physical key can re-derive; see docs/SECURITY.md.
+
+The Keychain cache and a security-key enrollment are alternatives to each other, never to the pasted master key: only one can be active per machine, and enabling one in settings replaces the other.
 
 ## Usage
 

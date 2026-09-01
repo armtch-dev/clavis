@@ -45,15 +45,16 @@ type welcomeModel struct {
 }
 
 // restoreOffer picks the one-time local-auth offer shown after a successful
-// restore unlock: the Keychain on macOS, security-key enrollment elsewhere
-// when a token is plugged in, or none. This is the only moment the pasted
-// master key is in hand, so the offer happens here or never.
+// restore unlock: security-key enrollment when a token is plugged in (it and
+// the Keychain are either/or, and a plugged-in key signals intent), else the
+// Keychain on macOS, else none. This is the only moment the pasted master
+// key is in hand, so the offer happens here or never.
 func restoreOffer(goos string, fidoReady bool) (welStep, bool) {
-	if goos == "darwin" {
-		return wCache, true
-	}
 	if fidoReady {
 		return wEnroll, true
+	}
+	if goos == "darwin" {
+		return wCache, true
 	}
 	return wChoice, false
 }

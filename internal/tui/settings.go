@@ -247,9 +247,20 @@ func (m *Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.busy = ""
 		if msg.err != nil {
 			s.errs = truncErr(msg.err)
-		} else {
-			m.setStatus(statusOK, "security key enrolled — tab on the unlock screen uses it")
+			return m, nil
 		}
+		// Keychain and security key are either/or: the enrollment that just
+		// succeeded replaces the cache. Removed only now — a failed enroll
+		// must not cost the user their working Keychain unlock.
+		status := "security key enrolled — tab on the unlock screen uses it"
+		if vault.HasKeychain() {
+			if err := vault.DeleteFromKeychain(); err != nil {
+				s.errs = truncErr(err)
+				return m, nil
+			}
+			status = "security key enrolled — replaces the Keychain cache"
+		}
+		m.setStatus(statusOK, status)
 		return m, nil
 
 	case tokenCheckedMsg:
@@ -325,9 +336,17 @@ func (m *Model) settingsKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			if err := vault.SaveToKeychain(id); err != nil {
 				s.errs = err.Error()
-			} else {
-				m.setStatus(statusOK, "master key cached in Keychain (Touch ID gated)")
+				return m, nil
 			}
+			status := "master key cached in Keychain (Touch ID gated)"
+			if fido2.Enrolled(m.cfgDir) {
+				if err := fido2.Remove(m.cfgDir); err != nil {
+					s.errs = err.Error()
+					return m, nil
+				}
+				status = "master key cached in Keychain — security-key unlock removed"
+			}
+			m.setStatus(statusOK, status)
 		case "f":
 			if !fido2.Available() {
 				s.errs = "fido2 tools not found — brew install libfido2 (or apt install fido2-tools)"
