@@ -94,6 +94,9 @@ func LoadFromKeychain() (string, error) {
 	if runtime.GOOS != "darwin" {
 		return "", fmt.Errorf("keychain storage is only available on macOS")
 	}
+	if !HasKeychain() {
+		return "", fmt.Errorf("no cached key in keychain")
+	}
 	// Touch ID / Apple Watch / password gate before the cached key is read.
 	// Failure (declined, or a headless session with no auth UI) just falls
 	// back to the interactive key prompt.
