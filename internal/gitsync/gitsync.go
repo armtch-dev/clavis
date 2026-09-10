@@ -27,6 +27,8 @@ import (
 	"syscall"
 	"time"
 
+	"filippo.io/age"
+
 	"github.com/armtch-dev/clavis/internal/fstxn"
 	"github.com/armtch-dev/clavis/internal/vault"
 )
@@ -508,6 +510,9 @@ func (c *Client) SyncLocked(l *fstxn.Lock, remote, msg string) error {
 		if err := c.guardTree("FETCH_HEAD"); err != nil {
 			return err
 		}
+		if err := c.guardGeneration(); err != nil {
+			return err
+		}
 		if _, err := c.git("rebase", "FETCH_HEAD"); err != nil {
 			return c.abortRebase(err)
 		}
@@ -568,9 +573,83 @@ func (c *Client) Pull() error {
 	if err := c.guardTree("FETCH_HEAD"); err != nil {
 		return err
 	}
+	if err := c.guardGeneration(); err != nil {
+		return err
+	}
 	_, err = c.git("rebase", "FETCH_HEAD")
 	if err != nil {
 		return c.abortRebase(err)
+	}
+	return nil
+}
+
+// ErrGenerationDivergence requires explicit credential migration, not a blind
+// rebase retry. Format-valid age blobs can still target the wrong master key.
+var ErrGenerationDivergence = errors.New("vault recipient generations diverged")
+
+func (c *Client) recipientAt(ref string) (string, error) {
+	out, err := c.git("show", ref+":vault.meta")
+	if err != nil {
+		return "", err
+	}
+	var m struct {
+		Version   int    `json:"version"`
+		Recipient string `json:"recipient"`
+	}
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		return "", fmt.Errorf("%s vault metadata: %w", ref, err)
+	}
+	if m.Version != 1 {
+		return "", fmt.Errorf("%s: unsupported vault metadata version %d", ref, m.Version)
+	}
+	if _, err := age.ParseX25519Recipient(m.Recipient); err != nil {
+		return "", fmt.Errorf("%s vault recipient: %w", ref, err)
+	}
+	return m.Recipient, nil
+}
+
+// Run after fetch but BEFORE rebase. A rotation may be fast-forwarded or rebased
+// over metadata-only changes. Divergent credential edits require both keys and
+// deliberate migration; keep each committed generation intact until then.
+func (c *Client) guardGeneration() error {
+	local, err := c.recipientAt("HEAD")
+	if err != nil {
+		return err
+	}
+	remote, err := c.recipientAt("FETCH_HEAD")
+	if err != nil {
+		return err
+	}
+	if local == remote {
+		return nil
+	}
+	refuse := fmt.Errorf("%w: credential changes cannot be replayed across a recipient rotation; local commits and worktree retained, nothing rebased or pushed. Keep both master keys and a copy of this config directory; reconcile the credential edits into the chosen generation using the matching keys before retrying (do not force-push or reset away local edits)", ErrGenerationDivergence)
+	// Pull does not commit first, so include uncommitted/untracked credentials.
+	working, err := c.git("status", "--porcelain", "-z", "--untracked-files=all", "--", "vault.meta", "vault/")
+	if err != nil {
+		return err
+	}
+	if working != "" {
+		return refuse
+	}
+	bases, err := c.git("merge-base", "--all", "HEAD", "FETCH_HEAD")
+	if err != nil || len(strings.Fields(bases)) != 1 {
+		return refuse
+	}
+	base := strings.TrimSpace(bases)
+	localChanges, err := c.git("diff", "--name-only", "-z", base, "HEAD", "--", "vault.meta", "vault/")
+	if err != nil {
+		return err
+	}
+	if localChanges == "" {
+		return nil
+	}
+	remoteChanges, err := c.git("diff", "--name-only", "-z", base, "FETCH_HEAD", "--", "vault.meta", "vault/")
+	if err != nil {
+		return err
+	}
+	if remoteChanges != "" {
+		return refuse
 	}
 	return nil
 }
