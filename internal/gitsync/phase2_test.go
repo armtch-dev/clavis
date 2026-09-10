@@ -197,6 +197,38 @@ func TestEnsureRepoRejectsSupportSymlinksBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestChangedOriginClearsOldPushURL(t *testing.T) {
+	c, _ := newRepo(t)
+	first, second := t.TempDir(), t.TempDir()
+	for _, dir := range []string{first, second} {
+		if _, err := c.git("init", "--bare", "-b", "main", dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.SetRemote(first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.git("config", "remote.origin.pushurl", first); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetRemote(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Sync("changed destination"); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		dir    string
+		exists bool
+	}{{first, false}, {second, true}} {
+		cmd := exec.Command("git", "--git-dir", item.dir, "rev-parse", "--verify", "refs/heads/main")
+		err := cmd.Run()
+		if (err == nil) != item.exists {
+			t.Fatalf("wrong destination: %s %v", item.dir, err)
+		}
+	}
+}
+
 func TestBatchFrameSubprocess(t *testing.T) {
 	encoded := os.Getenv("TEST_CLAVIS_BATCH_FRAME")
 	if encoded == "" {

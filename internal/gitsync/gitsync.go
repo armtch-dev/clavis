@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -414,17 +415,42 @@ func (c *Client) SetRemote(remote string) error {
 	return c.setRemote(remote)
 }
 
-func (c *Client) setRemote(url string) error {
-	if _, err := c.git("remote", "get-url", "origin"); err == nil {
-		_, err = c.git("remote", "set-url", "origin", url)
-		return err
+func (c *Client) setRemote(remote string) error {
+	if remote == "" || strings.HasPrefix(remote, "-") || strings.ContainsAny(remote, "\r\n\x00") {
+		return fmt.Errorf("invalid sync destination")
 	}
-	_, err := c.git("remote", "add", "origin", url)
+	if u, err := url.Parse(remote); err == nil && u.User != nil {
+		if _, has := u.User.Password(); has {
+			return fmt.Errorf("sync URL must not contain a password/token")
+		}
+	}
+	if _, err := c.git("remote", "get-url", "origin"); err == nil {
+		if _, err = c.git("config", "--replace-all", "remote.origin.url", remote); err != nil {
+			return err
+		}
+		// An old pushurl otherwise silently overrides the selected destination.
+		if out, err := c.git("config", "--get-all", "remote.origin.pushurl"); err == nil && strings.TrimSpace(out) != "" {
+			if _, err := c.git("config", "--unset-all", "remote.origin.pushurl"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	_, err := c.git("remote", "add", "origin", remote)
 	return err
 }
 
 func (c *Client) RemoteURL() string {
 	out, err := c.git("remote", "get-url", "origin")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// DestinationURL is Git's resolved push destination (including URL rewrites).
+func (c *Client) DestinationURL() string {
+	out, err := c.git("remote", "get-url", "--push", "origin")
 	if err != nil {
 		return ""
 	}
