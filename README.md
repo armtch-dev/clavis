@@ -2,17 +2,17 @@
 
 An SSH connection manager with an encrypted credential vault, live reachability probes, and guarded encrypted git sync.
 
-Clavis walks you through a step-by-step profile wizard to record SSH hosts. It keeps all passwords and private keys in an age-encrypted vault locked by a master key you generate once and store offline. When you add a profile, it immediately tests the connection so you know it works. Clavis watches your hosts with live TCP reachability probes every 15 seconds—status dots show latency at a glance, colored green for <50ms, yellow for <200ms, red for slower, or a hollow circle if the host is down. Sync to a private GitHub repository is encrypted and guarded: a plaintext secret will never accidentally leak into git. The UI uses the Night Owl palette, the same dark theme as scriptorium, and you can import your existing ~/.ssh/config in one keystroke.
+Clavis walks you through a step-by-step profile wizard to record SSH hosts, with a connection-test step. Passwords and private keys live in an age-encrypted vault; keep its master key outside the machine. Shared TCP probes show reachability and latency, separately from credential readiness and authentication results. Git sync checks allowed paths and encrypted-file headers, but metadata and scripts remain plaintext: never put secrets in those fields. The UI uses the Night Owl palette and can import supported settings from ~/.ssh/config.
 
 <img src="docs/tui.png" alt="The clavis profile list: live latency dots, sparkline trends, tags, and a detail pane for the selected host" width="1397">
 
-The add-profile wizard asks one question at a time; a pasted private key is encrypted straight into the vault and never touches disk in plaintext:
+The add-profile wizard asks one question at a time; saving a pasted private key writes encrypted vault data, without a plaintext staging file. External OpenSSH sessions have a separate temporary-key handoff described in [Security](docs/SECURITY.md):
 
 <img src="docs/wizard.png" alt="The add-profile wizard offering to paste a key or read it from a file" width="689">
 
 ## Install
 
-macOS and Linux (needs git, Go 1.26+, and the OpenSSH client — the installer offers to install anything missing via your package manager, with confirmation). One line:
+macOS and Linux (needs git, Go 1.26.5+, and the OpenSSH client — the installer offers to install anything missing via your package manager, with confirmation). One line:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/armtch-dev/clavis/main/install.sh | bash
@@ -39,10 +39,11 @@ clavis
 
 On first launch a welcome screen offers two paths:
 
-- **`n` — new vault**: generates your master key and shows it once—it looks like `AGE-SECRET-KEY-1…`. Press `c` to copy it to the clipboard for pasting into a password manager (then clear the clipboard), and store it somewhere outside this machine. Clavis will never write the master key to disk.
-- **`r` — restore**: setting up a machine you already have a clavis repo for? Paste the repo URL and a GitHub token, clavis fetches your encrypted config, then paste the master key from your original setup to unlock it. Profiles, scripts, settings, and credentials all come back; the token is stored encrypted on this machine only. After that one unlock, clavis offers to set up local auth so you never paste the key here again: enrolling a FIDO2 security key if one is plugged in, or caching the key in the Keychain on macOS.
+- **`n` — new vault**: generates your master key and shows it once—it looks like `AGE-SECRET-KEY-1…`. Press `c` to copy it to the clipboard for pasting into a password manager (then clear the clipboard), and store it somewhere outside this machine. Clavis does not create a plaintext master-key file; optional Keychain/FIDO unlock stores a protected local copy.
+- **`r` — restore**: setting up a machine you already have a clavis repo for? Paste the repo URL and a GitHub token, clavis fetches your metadata and encrypted credentials, then paste the master key from your original setup to unlock it. Profiles, scripts, settings, and credentials all come back; the token is stored encrypted on this machine only. After that unlock, clavis offers optional local auth: enrolling a FIDO2 security key if one is plugged in, or caching the key in the Keychain on macOS.
 
-On subsequent runs, clavis prompts you to unlock the vault. It tries three non-interactive sources first:
+On subsequent runs, clavis tries these sources before the manual key prompt
+(Keychain can request device-owner authentication):
 
 1. `CLAVIS_KEY` environment variable (for scripts and CI)
 2. `CLAVIS_KEY_FILE` environment variable (path to a file holding the master key)
@@ -71,6 +72,10 @@ The main interface is a list of SSH profiles. Keybindings:
 | `e` | Edit the selected profile (`enter` keeps any answer or stored credential as-is) |
 | `d` | Delete the selected profile and its vault secrets |
 | `t` | Test the connection (dial → handshake → auth → exec) |
+| `h` | Review a changed host key after testing; type `trust` to confirm |
+| `v` | Full connection details at any width; `c` copies target, `f` fingerprint |
+| `ctrl+e` | Expand the current/last error; `c` copies, `d` dismisses |
+| `D` / `X` | Resume / discard the retained script draft (this session only) |
 | `y` | Identities: reusable credentials shared by many hosts |
 | `s` | Sync now (guarded, encrypted git push) |
 | `g` | Settings: GitHub token, repo, autosync, keychain |
@@ -81,6 +86,62 @@ The main interface is a list of SSH profiles. Keybindings:
 | `j/k` or `↑/↓` | Move cursor up/down |
 | `?` | Show help overlay |
 | `q` or `ctrl+c` | Quit |
+
+In profile/identity edits, `ctrl+f` opens the field selector and `ctrl+s` saves.
+Script editors also save with `ctrl+s` (`ctrl+d` remains supported); `tab` and
+`shift+tab` traverse fields. Escape retains one script draft in memory; `ctrl+n`
+recovers a stale draft as a new copy. `ctrl+r` runs an unsaved script, or recovers
+storage when a failed-write barrier is active. Scroll panels/help with
+`pgup`/`pgdn`; Escape closes details/help. Settings `r` refreshes local-unlock
+status and `v` shows the actual sync destination, last success, and pending/dirty state.
+
+The field selector uses arrows or `j/k` (also Tab/Shift+Tab), with Home/End for
+first/last; Enter jumps to the field, Escape/Ctrl+F closes it. In the wizard,
+Tab advances except inside the key-paste textarea. Passwords and key passphrases preserve whitespace.
+An empty edit keeps the stored password; choosing **keep stored key** discards
+an abandoned replacement. Failed saves retain input. Existing edits whose
+metadata or credentials changed elsewhere must be reopened; script drafts can
+instead be recovered with Ctrl+N as a new copy. Drafts retain their original run
+target and refuse execution if that target has changed.
+
+After a storage failure, **Ctrl+R** reacquires storage, recovers pending writes,
+and reloads a coherent snapshot. Review the result and explicitly retry; deletion
+requires fresh confirmation. Recovery does not replay the failed action or
+restore a committed backup automatically. Persistent errors remain available
+through Ctrl+E even after the short footer expires. Escape cancels pending
+connection preflight; Ctrl+C cancels work and quits.
+
+For a changed host key, test with `t`, then `h` to review the full old/new
+fingerprints. Verify them independently, type `trust`, and press Enter; Escape
+cancels. In the wizard, `r` retests, `h` reviews, `b` goes back, and Enter/`s`
+saves. Wizard trust approval affects only the draft until it is saved.
+
+### SSH authentication and import
+
+Direct sessions, tests and scripts use stored key passphrases and try the stored
+password if key authentication is rejected. Setup is bounded and cancellable;
+interactive/script runtime continues after setup until completion or cancellation.
+
+Interactive **ProxyJump** uses native OpenSSH with a stored target key, including
+a protected key and optional target-password fallback. Jump credentials/options
+come from trusted OpenSSH configuration/agent/prompt providers; the jump retains
+its original prompt environment. Target fallback uses a private one-use FIFO
+askpass handoff, not password argv/environment values or a regular plaintext
+password file. That route rejects NUL/CR/LF and passwords over 1,022 bytes.
+Password-only ProxyJump and ProxyJump scripts are unsupported. Connection tests
+still dial the target directly; background probes skip jump profiles.
+
+Import supports literal Host aliases, case-sensitive wildcard/negated defaults,
+first-value precedence, Include scope/globs, tabs/equals syntax, quotes/comments,
+and case-preserved values for HostName, User, Port, IdentityFile and ProxyJump.
+Only the first IdentityFile is represented. Relative user-config Includes resolve
+from `~/.ssh`, including with a supplied main-file path. Wildcards supply defaults,
+not generated hosts. `Match`, active ProxyCommand/canonicalization, `%`/`${…}`
+expansion and `~user` paths are rejected; `ProxyCommand none` and
+`CanonicalizeHostname no` are accepted. Unrelated options are ignored; import
+does not execute configuration commands. Malformed supported syntax fails before
+publication. Duplicate/invalid entries and missing/unreadable keys are reported;
+metadata and successfully imported encrypted keys publish in one transaction.
 
 ### Identities
 
@@ -124,7 +185,8 @@ tags; leave tags empty for a universal script). The host is preflighted first, t
 script's live output; when it finishes you get the exit code and clavis waits
 for a keypress before returning to the list. Scripts are piped to `bash -s`
 on the remote side (falling back to plain `sh`), so nothing is written to the
-remote filesystem. ProxyJump hosts aren't supported for script runs yet.
+remote filesystem by the transport (the script's own commands may write files).
+ProxyJump hosts aren't supported for script runs yet.
 
 ### CLI Subcommands
 
@@ -138,6 +200,27 @@ clavis version             # Show version
 clavis --dump-frame        # Debug flag: render a single frame and exit
 ```
 
+### Rotation and local recovery
+
+`clavis vault rekey` unlocks the old vault and **prepares** the new ciphertext
+without replacing the live generation. Store the displayed new key externally,
+then type `saved` and Enter to commit. Failed key output, EOF or another response
+aborts preparation. On a commit/storage error, retain **both keys** and the local
+journals; an error alone does not establish which generation is active.
+
+Successful rotation removes the active FIDO enrollment: unlock with the new key
+and re-enroll in Settings. Keychain is refreshed when it supplied the rekey unlock;
+update environment/key files and other caches as applicable. Sync the rotation
+before using the new key on other machines. The **old key still decrypts old Git
+ciphertext** and the matching local backup; rotation does not revoke history.
+
+The last committed transaction's ciphertext/metadata backup is retained locally
+until the next validated nonempty transaction starts. Explicit restoration is
+available through the internal `fstxn.Lock.RestoreLast` API, followed by a complete
+reload; there is no user-facing restore-last CLI command. Preserve the directory
+before further writes if you need assisted restoration. See [Security](docs/SECURITY.md)
+for the recovery contract and limits.
+
 ## Sync Setup
 
 Press `g` from the main list to enter settings.
@@ -146,11 +229,31 @@ Press `g` from the main list to enter settings.
 
 2. **Create or link a repository**: Clavis confirms before creating a private repository on your GitHub account. You can also point to an existing private repo.
 
-3. **Enable autosync** (optional): Syncs to git after every change. Manual sync is always available via `s`.
+3. **Enable autosync** (optional): Requests sync after changes. Manual sync is available via `s`; overlapping requests coalesce into one follow-up.
 
-What gets synced: `profiles.json` (host metadata), `identities.json` (identity metadata), `config.json` (preferences), `vault.meta` (vault version + recipient), and encrypted vault secrets (`vault/*.age`).
+What gets synced: `profiles.json` (host metadata), `identities.json` (identity metadata), `scripts.json` (plaintext scripts), `config.json` (preferences), `vault.meta` (vault version + recipient + encrypted canary), and encrypted vault secrets (`vault/*.age`). Repository `.gitignore` and `README.md` are also allowlisted.
 
-What never syncs: your master key (never stored by clavis), the GitHub token (stored locally), and anything in `local/`.
+Clavis sync excludes the master-key caches, GitHub token, recovery journals and
+everything in `local/`. Opt-in Keychain/FIDO copies remain machine-local.
+
+Sync owns the config directory through Git operations and complete state reload;
+mutations pause while it runs. Selection follows profile IDs. An unchanged
+recipient keeps the unlocked identity; a changed recipient asks for the new key.
+The selected URL reconciles `origin` and removes an obsolete push override.
+Settings `v` shows Git's resolved push destination after an attempt, including
+URL rewrites. Before resolution it may show the requested destination. Last
+success is session-local and may refer to a previous destination; dirty is a
+conservative local-change indication, not a live Git diff.
+
+Conflicts/cancellation attempt a bounded rebase abort and retain local commits.
+Read Ctrl+E details, preserve the directory, and resolve conflicts before retrying;
+if abort fails, follow the reported Git recovery instructions. Unfinished merges/
+rebases are refused. When different key generations both changed credentials,
+sync refuses **before rebase/push** rather than producing mixed-generation data.
+Keep both keys and directory copies, reconcile credentials into a chosen
+generation with the matching keys, then retry. Repeated sync alone cannot resolve
+this; do not reset or force-push away unsaved history. Other machines may need
+their local token re-entered and FIDO re-enrolled after a remote rotation.
 
 ## Data Layout
 
@@ -159,6 +262,8 @@ Clavis stores everything in `~/.config/clavis`:
 ```
 ~/.config/clavis/
 ├── profiles.json           # Non-secret metadata (host, user, port, auth flags, tags)
+├── identities.json         # Reusable identity metadata
+├── scripts.json            # Plaintext script library; no secrets
 ├── config.json             # Sync settings, UI preferences
 ├── vault.meta              # Vault version, age recipient, encrypted canary
 ├── .gitignore              # Blocks local/ and plaintext key patterns
@@ -166,8 +271,13 @@ Clavis stores everything in `~/.config/clavis`:
 │   ├── <id>.pass.age       # Encrypted SSH passwords
 │   ├── <id>.sshkey.age     # Encrypted SSH private keys
 │   └── <id>.passphrase.age # Encrypted key passphrases
-└── local/
-    └── github-token.age    # Machine-local GitHub PAT (encrypted, gitignored)
+└── local/                  # Machine-local; gitignored
+    ├── github-token.age    # Encrypted GitHub PAT
+    ├── fido2.json          # Optional hardware-enrollment metadata
+    ├── master-key.fido2.age # Optional hardware-wrapped master key
+    ├── .clavis.lock        # Persistent advisory lock; do not unlink
+    ├── .clavis-transaction.json # Pending recovery journal, when present
+    └── .clavis-committed.json   # Last committed ciphertext/metadata backup
 ```
 
 The `vault/` directory is synced to git (encrypted). The `local/` directory is not.
@@ -182,9 +292,29 @@ On the profile list, each row shows:
   - `●` red: latency ≥200ms
   - `○` red: host is down (TCP connection refused or timeout)
 - **Latency**: The most recent round-trip time to the SSH port, or "down"
-- **Sparkline**: A mini chart of the last 12 probe results; failures show as `×`
+- **Sparkline**: Recent samples from a per-profile history of up to 30 results,
+  narrowed to available space; failures show as crosses
 
-Probes run every 15 seconds to the SSH port (a TCP dial, not ICMP ping) so they work on any network and require no root.
+Direct targets share one probe per distinct address, with at most **16 active
+dial/banner exchanges**. Probes use TCP, require no root, and normally repeat
+every 15 seconds after initial jitter. Consecutive failures back off to 30, 60,
+120, 240, then 300 seconds; success resets the interval. Session suspension pauses
+the whole shared address until every owner resumes. Shutdown cancels queued and
+active work; retargeted/deleted profiles reject stale observations.
+
+A green dot means TCP reachability, not authenticated SSH readiness. Jump rows say
+`via jump` and are not probed. `v` shows credential/auth-test state, last-check age,
+min/avg/max and the chart-scale explanation; the wide detail chart labels its
+numeric scale and shows last-seen information for down hosts. Chart columns
+are samples, **not evenly spaced time**, especially during backoff or suspension.
+
+## Remediation and validation
+
+[Remediation summary](docs/REMEDIATION_SUMMARY.md) maps all 21 review findings and
+the additional UX/scale recommendations to implementation. The original
+[application review](docs/APPLICATION_REVIEW.md) remains historical evidence.
+[Validation handoff](docs/VALIDATION_HANDOFF.md) records prior checks, untested
+paths and deliberately deferred UI/performance validation.
 
 ## Environment Variables
 
