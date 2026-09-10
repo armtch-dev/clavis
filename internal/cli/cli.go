@@ -6,6 +6,9 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +21,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/armtch-dev/clavis/internal/fstxn"
 	"github.com/armtch-dev/clavis/internal/gitsync"
 	"github.com/armtch-dev/clavis/internal/profile"
 	"github.com/armtch-dev/clavis/internal/sshconfig"
@@ -56,11 +60,56 @@ func Doctor(w io.Writer, configDir string) error {
 	// Vault presence gates every check below it — if it's not initialized
 	// there is nothing to unlock or verify, and prompting for a key would be
 	// pointless (and would hang non-interactive callers).
-	v, err := vault.Load(configDir)
+	l, err := fstxn.Acquire(configDir)
+	if err != nil {
+		return fmt.Errorf("doctor storage: %w", err)
+	}
+	defer l.Close()
+	v, err := vault.LoadLocked(l)
 	if err != nil {
 		fail("vault: %v", err)
 	} else {
 		ok("vault initialized (recipient %s)", v.Recipient())
+		store, storeErr := profile.LoadStoreLocked(l)
+		ids, idsErr := profile.LoadIdentitiesLocked(l)
+		if storeErr != nil {
+			fail("profiles: %v", storeErr)
+		}
+		if idsErr != nil {
+			fail("identities: %v", idsErr)
+		}
+		checkCredentials := func(label, pass, key string, auth []profile.AuthKind) {
+			for _, a := range auth {
+				name := pass
+				if a == profile.AuthKey {
+					name = key
+				}
+				if err := v.HasLocked(l, name, false); err != nil {
+					fail("%s: required %s credential %s: %v", label, a, name, err)
+				}
+			}
+		}
+		if idsErr == nil {
+			for _, i := range ids.Identities {
+				checkCredentials("identity "+i.Name, i.PassSecret(), i.KeySecret(), i.Auth)
+			}
+		}
+		if storeErr == nil {
+			for _, p := range store.Profiles {
+				if p.IdentityID != "" {
+					if idsErr == nil && ids.ByID(p.IdentityID) == nil {
+						fail("profile %s: missing identity %s", p.Name, p.IdentityID)
+					}
+				} else {
+					checkCredentials("profile "+p.Name, p.PassSecret(), p.KeySecret(), p.Auth)
+				}
+			}
+		}
+		if enrolled, err := inspectFIDO(l); err != nil {
+			fail("FIDO enrollment: %v", err)
+		} else if enrolled {
+			info("FIDO enrollment files present; unlock with your security key to verify the hardware-wrapped master key (not decrypted by vault integrity checks)")
+		}
 
 		identity, source := vault.ResolveIdentity()
 		if identity == "" {
@@ -78,10 +127,10 @@ func Doctor(w io.Writer, configDir string) error {
 				fail("vault unlock: %v", err)
 			} else {
 				ok("vault unlocked")
-				if err := v.VerifyAll(); err != nil {
+				if err := v.VerifyAllLocked(l); err != nil {
 					fail("vault integrity check: %v", err)
 				} else {
-					ok("vault integrity check (all secrets decrypt)")
+					ok("vault integrity check (all vault-owned secrets decrypt)")
 				}
 			}
 		}
@@ -110,6 +159,36 @@ func Doctor(w io.Writer, configDir string) error {
 	}
 	fmt.Fprintln(w, "doctor: all checks passed")
 	return nil
+}
+
+// inspectFIDO checks the local enrollment pair without claiming authentication
+// of its scrypt ciphertext. Only fido2.Unlock's hardware ceremony can do that.
+func inspectFIDO(l *fstxn.Lock) (bool, error) {
+	ct, ctErr := l.ReadFile("local/master-key.fido2.age")
+	raw, metaErr := l.ReadFile("local/fido2.json")
+	if os.IsNotExist(ctErr) && os.IsNotExist(metaErr) {
+		return false, nil
+	}
+	if ctErr != nil || metaErr != nil {
+		return false, fmt.Errorf("incomplete or unreadable enrollment; re-enroll your security key: %w", errors.Join(ctErr, metaErr))
+	}
+	var m struct {
+		CredentialID string `json:"credential_id"`
+		Salt         string `json:"salt"`
+		RPID         string `json:"rpid"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return false, fmt.Errorf("corrupt fido2.json: %w", err)
+	}
+	cred, credErr := base64.StdEncoding.DecodeString(m.CredentialID)
+	salt, saltErr := base64.StdEncoding.DecodeString(m.Salt)
+	if credErr != nil || len(cred) == 0 || saltErr != nil || len(salt) != 32 || m.RPID != "clavis" {
+		return false, errors.New("corrupt FIDO credential metadata; re-enroll your security key")
+	}
+	if !bytes.HasPrefix(ct, []byte(vault.AgeHeader+"\n-> scrypt ")) {
+		return false, errors.New("FIDO master-key envelope is not age scrypt ciphertext; re-enroll your security key")
+	}
+	return true, nil
 }
 
 // VaultRekey displays a prepared key and asks for acknowledgement before commit.

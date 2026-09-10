@@ -3,11 +3,14 @@ package fido2
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/armtch-dev/clavis/internal/fstxn"
+	"github.com/armtch-dev/clavis/internal/vault"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Deterministic 32-byte "hmac secrets" the fake fido2-assert emits.
@@ -79,7 +82,10 @@ func TestAvailable(t *testing.T) {
 func TestEnrollUnlockRoundTrip(t *testing.T) {
 	installFakes(t)
 	cfg := t.TempDir()
-	const identity = "AGE-SECRET-KEY-1TESTTESTTESTTESTTESTTESTTESTTESTTESTTESTTESTTESTTESTTEST"
+	_, identity, err := vault.Init(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if Enrolled(cfg) {
 		t.Fatal("Enrolled() = true before enrolling")
@@ -129,13 +135,16 @@ func TestEnrollUnlockRoundTrip(t *testing.T) {
 func TestUnlockWrongSecretFails(t *testing.T) {
 	fakes := installFakes(t)
 	cfg := t.TempDir()
-	const identity = "AGE-SECRET-KEY-1TESTTESTTESTTESTTESTTESTTESTTESTTESTTESTTESTTESTTESTTEST"
+	_, identity, err := vault.Init(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := Enroll(cfg, identity); err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
 	// A different key (or tampered salt) yields a different hmac secret.
 	setAssertFake(t, fakes, wrongSecret)
-	_, err := Unlock(cfg)
+	_, err = Unlock(cfg)
 	if err == nil {
 		t.Fatal("Unlock succeeded with the wrong hmac secret")
 	}
@@ -149,7 +158,11 @@ func TestUnlockWrongSecretFails(t *testing.T) {
 func TestRemove(t *testing.T) {
 	installFakes(t)
 	cfg := t.TempDir()
-	if err := Enroll(cfg, "AGE-SECRET-KEY-1TEST"); err != nil {
+	_, identity, err := vault.Init(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Enroll(cfg, identity); err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
 	if err := Remove(cfg); err != nil {
@@ -179,5 +192,125 @@ func TestEnrollNoDevice(t *testing.T) {
 	writeFake(t, fakes, "fido2-token", "#!/bin/sh\nexit 0\n")
 	if err := Enroll(t.TempDir(), "AGE-SECRET-KEY-1TEST"); err == nil {
 		t.Fatal("Enroll succeeded with no device connected")
+	}
+}
+
+func TestEnrollmentCannotPublishRetiredKey(t *testing.T) {
+	installFakes(t)
+	dir := t.TempDir()
+	v, old, err := vault.Init(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prep, err := v.PrepareRekey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prep.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := Enroll(dir, old); err == nil {
+		t.Fatal("stale enrollment committed")
+	}
+	if Enrolled(dir) {
+		t.Fatal("retired identity became active")
+	}
+}
+
+func TestEnrollmentPreservesLegacyEnvelopeSpelling(t *testing.T) {
+	installFakes(t)
+	dir := t.TempDir()
+	_, key, err := vault.Init(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Enroll(dir, key); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(dir, "local", "Master-Key.FIDO2.AGE")
+	if err := os.Rename(keyPath(dir), legacy); err != nil {
+		t.Fatal(err)
+	}
+	l, err := fstxn.Acquire(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, pathErr := envelopePathLocked(l)
+	l.Close()
+	if pathErr != nil || path != "local/Master-Key.FIDO2.AGE" {
+		t.Fatalf("legacy path lookup: %q %v", path, pathErr)
+	}
+	if err := Enroll(dir, key); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "local"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelopes []string
+	for _, e := range entries {
+		if strings.EqualFold(e.Name(), "master-key.fido2.age") {
+			envelopes = append(envelopes, e.Name())
+		}
+	}
+	if len(envelopes) != 1 || envelopes[0] != "Master-Key.FIDO2.AGE" {
+		t.Fatalf("alias replaced/duplicated: %v", envelopes)
+	}
+	if !Enrolled(dir) {
+		t.Fatal("legacy enrollment absent")
+	}
+	if got, err := Unlock(dir); err != nil || got != key {
+		t.Fatalf("legacy unlock: %v", err)
+	}
+}
+
+func TestEnrollmentRechecksRecipientAfterHardwareCeremony(t *testing.T) {
+	fakes := installFakes(t)
+	dir := t.TempDir()
+	v, key, err := vault.Init(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, proceed := filepath.Join(fakes, "ready"), filepath.Join(fakes, "proceed")
+	writeFake(t, fakes, "fido2-assert", fmt.Sprintf(`#!/bin/sh
+read cdh; read rp; read cred; read salt
+printf ready > '%s'
+while [ ! -f '%s' ]; do sleep 0.01; done
+printf '%%s\n' "$cdh" "$rp" YXV0aGRhdGE= c2lnbmF0dXJl '%s'
+`, ready, proceed, testSecret))
+	done := make(chan error, 1)
+	go func() { done <- Enroll(dir, key) }()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ceremony did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	prep, err := v.PrepareRekey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prep.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proceed, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("enrollment published retired recipient after ceremony")
+		}
+	// Envelope scrypt runs after the ceremony and before the recipient check;
+	// allow race-instrumented crypto to finish while retaining a bounded wait.
+	case <-time.After(15 * time.Second):
+		t.Fatal("enrollment did not complete within the 15-second budget")
+	}
+	if Enrolled(dir) {
+		t.Fatal("retired enrollment active")
 	}
 }

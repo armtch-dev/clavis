@@ -15,6 +15,7 @@ package fido2
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -24,8 +25,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"filippo.io/age"
+	"github.com/armtch-dev/clavis/internal/fstxn"
+	"github.com/armtch-dev/clavis/internal/vault"
 )
 
 const rpID = "clavis"
@@ -59,21 +63,58 @@ func Available() bool {
 
 // Present reports whether a security key is currently connected.
 func Present() bool {
-	_, err := firstDevice()
+	return PresentContext(context.Background())
+}
+
+func PresentContext(ctx context.Context) bool {
+	_, err := firstDeviceContext(ctx)
 	return err == nil
 }
 
 // Enrolled reports whether this machine has a security-key enrollment.
 func Enrolled(configDir string) bool {
 	_, errM := os.Stat(metaPath(configDir))
-	_, errK := os.Stat(keyPath(configDir))
-	return errM == nil && errK == nil
+	entries, err := os.ReadDir(filepath.Join(configDir, "local"))
+	if errM != nil || err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if strings.EqualFold(e.Name(), "master-key.fido2.age") && e.Type().IsRegular() {
+			return true
+		}
+	}
+	return false
+}
+
+func envelopePathLocked(l *fstxn.Lock) (string, error) {
+	entries, err := l.ReadDir("local")
+	if err != nil {
+		return "", err
+	}
+	path := ""
+	for _, e := range entries {
+		if strings.EqualFold(e.Name(), "master-key.fido2.age") {
+			if path != "" {
+				return "", fmt.Errorf("multiple case-aliased FIDO envelopes")
+			}
+			path = "local/" + e.Name()
+		}
+	}
+	if path == "" {
+		path = "local/master-key.fido2.age"
+	}
+	return path, nil
 }
 
 // run executes a fido2 tool with the given stdin lines, returning stdout.
 // Only stderr goes into the error — the tools print secrets on stdout only.
 func run(stdin []string, name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	return runContext(context.Background(), stdin, name, args...)
+}
+
+func runContext(ctx context.Context, stdin []string, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = time.Second
 	if stdin != nil {
 		cmd.Stdin = strings.NewReader(strings.Join(stdin, "\n") + "\n")
 	}
@@ -89,7 +130,11 @@ func run(stdin []string, name string, args ...string) (string, error) {
 // firstDevice returns the first authenticator listed by `fido2-token -L`,
 // which prints one device per line as "<path>: vendor=..., product=...".
 func firstDevice() (string, error) {
-	out, err := run(nil, "fido2-token", "-L")
+	return firstDeviceContext(context.Background())
+}
+
+func firstDeviceContext(ctx context.Context) (string, error) {
+	out, err := runContext(ctx, nil, "fido2-token", "-L")
 	if err != nil {
 		return "", err
 	}
@@ -112,6 +157,10 @@ func randB64(n int) (string, error) {
 // assert runs `fido2-assert -G -h` (the user must touch the key) and returns
 // the derived hmac secret, base64 as printed.
 func assert(dev, credID, salt string) (string, error) {
+	return assertContext(context.Background(), dev, credID, salt)
+}
+
+func assertContext(ctx context.Context, dev, credID, salt string) (string, error) {
 	cdh, err := randB64(32)
 	if err != nil {
 		return "", err
@@ -119,7 +168,7 @@ func assert(dev, credID, salt string) (string, error) {
 	// fido2-assert(1) -G reads, in order: client data hash (base64),
 	// relying party id, credential id (base64, non-resident), hmac salt
 	// (base64, since -h is set).
-	out, err := run([]string{cdh, rpID, credID, salt}, "fido2-assert", "-G", "-h", dev)
+	out, err := runContext(ctx, []string{cdh, rpID, credID, salt}, "fido2-assert", "-G", "-h", dev)
 	if err != nil {
 		return "", err
 	}
@@ -138,7 +187,11 @@ func assert(dev, credID, salt string) (string, error) {
 // secret), then stores fido2.json and master-key.fido2.age under
 // <configDir>/local/.
 func Enroll(configDir, identity string) error {
-	dev, err := firstDevice()
+	return EnrollContext(context.Background(), configDir, identity)
+}
+
+func EnrollContext(ctx context.Context, configDir, identity string) error {
+	dev, err := firstDeviceContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -156,7 +209,7 @@ func Enroll(configDir, identity string) error {
 	}
 	// fido2-cred(1) -M reads, in order: client data hash (base64), relying
 	// party id, user name, user id (base64). -h enables hmac-secret.
-	out, err := run([]string{cdh, rpID, rpID, userID}, "fido2-cred", "-M", "-h", dev)
+	out, err := runContext(ctx, []string{cdh, rpID, rpID, userID}, "fido2-cred", "-M", "-h", dev)
 	if err != nil {
 		return err
 	}
@@ -168,7 +221,7 @@ func Enroll(configDir, identity string) error {
 	}
 	credID := strings.TrimSpace(lines[4])
 
-	secret, err := assert(dev, credID, salt)
+	secret, err := assertContext(ctx, dev, credID, salt)
 	if err != nil {
 		return err
 	}
@@ -176,40 +229,65 @@ func Enroll(configDir, identity string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(metaPath(configDir)), 0o700); err != nil {
-		return err
-	}
 	mj, err := json.Marshal(meta{CredentialID: credID, Salt: salt, RPID: rpID})
 	if err != nil {
 		return err
 	}
-	// Plain (non-atomic) writes are fine: a torn file just means re-enrolling.
-	if err := os.WriteFile(metaPath(configDir), mj, 0o600); err != nil {
+	// Hardware work happens without ownership. Revalidate the wrapped identity
+	// under the lock so a concurrent rekey cannot install a retired enrollment.
+	l, err := fstxn.AcquireContext(ctx, configDir)
+	if err != nil {
 		return err
 	}
-	return os.WriteFile(keyPath(configDir), wrapped, 0o600)
+	defer l.Close()
+	v, err := vault.LoadLocked(l)
+	if err != nil {
+		return err
+	}
+	if err := v.Unlock(identity); err != nil {
+		return fmt.Errorf("vault changed during enrollment; unlock and retry: %w", err)
+	}
+	path, err := envelopePathLocked(l)
+	if err != nil {
+		return err
+	}
+	return l.Apply([]fstxn.Change{{Path: "local/fido2.json", Data: mj}, {Path: path, Data: wrapped}})
 }
 
 // Unlock asserts against the enrolled credential (user must touch the key),
 // re-derives the hmac secret, and returns the decrypted identity string.
 func Unlock(configDir string) (string, error) {
-	raw, err := os.ReadFile(metaPath(configDir))
+	return UnlockContext(context.Background(), configDir)
+}
+
+func UnlockContext(ctx context.Context, configDir string) (string, error) {
+	l, err := fstxn.AcquireContext(ctx, configDir)
 	if err != nil {
 		return "", err
+	}
+	raw, err := l.ReadFile("local/fido2.json")
+	path, pathErr := envelopePathLocked(l)
+	if pathErr != nil {
+		l.Close()
+		return "", pathErr
+	}
+	ct, ctErr := l.ReadFile(path)
+	l.Close()
+	if err != nil {
+		return "", err
+	}
+	if ctErr != nil {
+		return "", ctErr
 	}
 	var m meta
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return "", fmt.Errorf("fido2.json: %v", err)
 	}
-	dev, err := firstDevice()
+	dev, err := firstDeviceContext(ctx)
 	if err != nil {
 		return "", err
 	}
-	secret, err := assert(dev, m.CredentialID, m.Salt)
-	if err != nil {
-		return "", err
-	}
-	ct, err := os.ReadFile(keyPath(configDir))
+	secret, err := assertContext(ctx, dev, m.CredentialID, m.Salt)
 	if err != nil {
 		return "", err
 	}
@@ -225,6 +303,24 @@ func Unlock(configDir string) (string, error) {
 	plain, err := io.ReadAll(r)
 	if err != nil {
 		return "", fmt.Errorf("security key secret does not unlock the stored master key (wrong key, or enrollment files tampered?)")
+	}
+	l, err = fstxn.AcquireContext(ctx, configDir)
+	if err != nil {
+		return "", err
+	}
+	defer l.Close()
+	if err := fstxn.RevisionOf(raw).Check(l, "local/fido2.json"); err != nil {
+		return "", err
+	}
+	if err := fstxn.RevisionOf(ct).Check(l, path); err != nil {
+		return "", err
+	}
+	v, err := vault.LoadLocked(l)
+	if err != nil {
+		return "", err
+	}
+	if err := v.Unlock(string(plain)); err != nil {
+		return "", err
 	}
 	return string(plain), nil
 }
@@ -254,10 +350,24 @@ func wrap(secret, identity string) ([]byte, error) {
 // Remove deletes the enrollment files (the credential on the key is
 // untouched — nothing secret lives there without the salt anyway).
 func Remove(configDir string) error {
-	for _, p := range []string{metaPath(configDir), keyPath(configDir)} {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			return err
+	l, err := fstxn.Acquire(configDir)
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	return RemoveLocked(l)
+}
+
+func RemoveLocked(l *fstxn.Lock) error {
+	changes := []fstxn.Change{{Path: "local/fido2.json", Delete: true}}
+	entries, err := l.ReadDir("local")
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if strings.EqualFold(e.Name(), "master-key.fido2.age") {
+			changes = append(changes, fstxn.Change{Path: "local/" + e.Name(), Delete: true})
 		}
 	}
-	return nil
+	return l.Apply(changes)
 }

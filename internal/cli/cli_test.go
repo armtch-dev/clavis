@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"filippo.io/age"
+
 	"github.com/armtch-dev/clavis/internal/profile"
 	"github.com/armtch-dev/clavis/internal/vault"
 )
@@ -71,6 +73,62 @@ func TestDoctorInitializedVaultUnlocksViaEnv(t *testing.T) {
 	}
 	if !strings.Contains(out, "all checks passed") {
 		t.Errorf("expected overall success message, got:\n%s", out)
+	}
+}
+
+func TestDoctorMissingRequiredCredentialsAndIdentity(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	v, key, err := vault.Init(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(vault.EnvKey, key)
+	s, _ := profile.LoadStore(dir)
+	p, err := s.Add(profile.Profile{Name: "password-host", Host: "h", User: "u", Auth: []profile.AuthKind{profile.AuthPassword}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	passName := p.PassSecret()
+	if _, err := s.Add(profile.Profile{Name: "orphan-host", Host: "h", IdentityID: "missing"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	ids, _ := profile.LoadIdentities(dir)
+	i, err := ids.Add(profile.Identity{Name: "shared-key", User: "u", Auth: []profile.AuthKind{profile.AuthKey}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyName := i.KeySecret()
+	if err := ids.Save(); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Doctor(&out, dir); err == nil {
+		t.Fatal("doctor accepted missing credentials")
+	}
+	for _, want := range []string{"password-host", passName, "orphan-host", "missing", "shared-key", keyName} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing diagnostic %q: %s", want, out.String())
+		}
+	}
+	if err := v.Put(passName, []byte("password")); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Put(keyName, []byte("key")); err != nil {
+		t.Fatal(err)
+	}
+	s.Profiles = []profile.Profile{{ID: "p1", Name: "resolved", Host: "h", Port: 22, IdentityID: i.ID}}
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Doctor(&out, dir); err != nil {
+		t.Fatalf("repaired references failed: %v\n%s", err, out.String())
 	}
 }
 
@@ -256,6 +314,8 @@ func TestUninstallRequiresConfirmation(t *testing.T) {
 }
 
 func TestUninstallRemovesEverything(t *testing.T) {
+	// Never invoke the user's real macOS security/keychain command in tests.
+	t.Setenv("PATH", t.TempDir())
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, "vault"), 0o700)
 	os.WriteFile(filepath.Join(dir, "vault", "x.age"), []byte("ct"), 0o600)
@@ -352,6 +412,67 @@ func TestRekeyFlushFailureAbortsBeforeRetirement(t *testing.T) {
 	}
 	if err := fresh.Unlock(old); err != nil {
 		t.Fatal("undelivered key retired old generation", err)
+	}
+}
+
+func TestDoctorReportsSeparateFIDOHealth(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, key, err := vault.Init(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(vault.EnvKey, key)
+	rec, err := age.NewScryptRecipient("synthetic-hardware-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.SetWorkFactor(1)
+	var ciphertext bytes.Buffer
+	w, err := age.Encrypt(&ciphertext, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(w, key); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "local/master-key.fido2.age"), ciphertext.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	metaPath := filepath.Join(dir, "local/fido2.json")
+	meta := []byte(`{"credential_id":"Y3JlZA==","salt":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","rpid":"clavis"}`)
+	if err := os.WriteFile(metaPath, meta, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Doctor(&out, dir); err != nil {
+		t.Fatal("valid FIDO enrollment failed doctor", err, out.String())
+	}
+	if !strings.Contains(out.String(), "hardware") {
+		t.Fatal("doctor implied hardware envelope was decrypted")
+	}
+	if err := os.Remove(metaPath); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Doctor(&out, dir); err == nil {
+		t.Fatal("incomplete FIDO enrollment passed doctor")
+	}
+	outside := filepath.Join(t.TempDir(), "fido2.json")
+	if err := os.WriteFile(outside, meta, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, metaPath); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Doctor(&out, dir); err == nil {
+		t.Fatal("symlink enrollment metadata passed doctor")
 	}
 }
 
