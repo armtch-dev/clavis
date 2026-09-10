@@ -1,8 +1,6 @@
-// Package vault stores secrets (SSH passwords, private keys, tokens) as
-// age-encrypted files. The X25519 identity is the master key: generated once
-// at install, shown to the user, and never persisted inside the config dir.
-// Only the recipient (public key) is stored, so writing secrets never needs
-// the identity — reading them does.
+// Package vault stores secrets as age-encrypted files. The X25519 identity is
+// never persisted in plaintext; only its recipient and an encrypted canary are
+// stored in vault.meta. Machine-local FIDO wrapping has a separate identity.
 package vault
 
 import (
@@ -14,18 +12,20 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"filippo.io/age"
+	"github.com/armtch-dev/clavis/internal/fstxn"
 )
 
 const (
-	metaVersion = 1
-	canaryText  = "clavis-canary-v1"
-	// AgeHeader is the first line of every age v1 file; the gitsync plaintext
-	// guard checks vault files against it before any push.
-	AgeHeader = "age-encryption.org/v1"
+	metaVersion  = 1
+	canaryText   = "clavis-canary-v1"
+	AgeHeader    = "age-encryption.org/v1"
+	fidoKeyPath  = "local/master-key.fido2.age"
+	fidoMetaPath = "local/fido2.json"
 )
 
 var (
@@ -34,108 +34,152 @@ var (
 	ErrNotFound     = errors.New("secret not found")
 	ErrNotInited    = errors.New("vault not initialized — run clavis once to set it up")
 	ErrAlreadyExist = errors.New("vault already initialized")
-
-	secretNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+	ErrStale        = errors.New("vault recipient changed on disk; reload and unlock before retrying")
+	secretNameRe    = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 )
 
 type meta struct {
 	Version   int    `json:"version"`
 	Recipient string `json:"recipient"`
-	Canary    string `json:"canary"` // age-encrypted canaryText, base64-free (raw file would be binary; stored hex-less via armor? no: stored as separate file)
+	Canary    string `json:"canary"`
 	CreatedAt string `json:"created_at"`
 }
 
-// Vault manages two secret directories under configDir:
-//   - vault/  — synced to git (encrypted)
-//   - local/  — machine-only (encrypted, gitignored; e.g. GitHub PAT)
+// Vault is single-owner in-memory state. Disk operations acquire an exclusive
+// config-directory lock; Locked variants instead require caller-owned locking.
 type Vault struct {
 	ConfigDir string
-	Dir       string // synced secrets
-	LocalDir  string // machine-local secrets
+	Dir       string
+	LocalDir  string
 	metaPath  string
-
 	recipient *age.X25519Recipient
 	identity  *age.X25519Identity
 }
 
-// Init creates a brand-new vault and returns the identity string
-// (AGE-SECRET-KEY-1…) for one-time display to the user. It is never written
-// to disk by clavis.
+func layout(configDir string) *Vault {
+	return &Vault{ConfigDir: configDir, Dir: filepath.Join(configDir, "vault"), LocalDir: filepath.Join(configDir, "local"), metaPath: filepath.Join(configDir, "vault.meta")}
+}
+
+// Init returns a new vault and its master key for one-time display.
 func Init(configDir string) (*Vault, string, error) {
-	v := layout(configDir)
-	if _, err := os.Stat(v.metaPath); err == nil {
+	l, err := fstxn.Acquire(configDir)
+	if err != nil {
+		return nil, "", err
+	}
+	defer l.Close()
+	return InitLocked(l)
+}
+
+// InitLocked initializes only an absent vault under the caller's ownership.
+// It never acquires a second lock; Init remains the blocking convenience API.
+func InitLocked(l *fstxn.Lock) (*Vault, string, error) {
+	if _, err := l.ReadFile("vault.meta"); err == nil {
 		return nil, "", ErrAlreadyExist
+	} else if !os.IsNotExist(err) {
+		return nil, "", err
+	}
+	v := layout(l.Dir())
+	// Keep the existing empty directory layout. Mkdir never follows a new link.
+	if _, err := l.ReadDir("vault"); os.IsNotExist(err) {
+		if err := os.Mkdir(v.Dir, 0700); err != nil {
+			return nil, "", err
+		}
+	} else if err != nil {
+		return nil, "", err
 	}
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
 		return nil, "", err
 	}
-	if err := v.writeMeta(id.Recipient()); err != nil {
+	c, err := metadataChange(id.Recipient())
+	if err != nil {
 		return nil, "", err
 	}
-	v.recipient = id.Recipient()
-	v.identity = id
+	if err := l.Apply([]fstxn.Change{c}); err != nil {
+		return nil, "", err
+	}
+	v.recipient, v.identity = id.Recipient(), id
 	return v, id.String(), nil
 }
 
-// Load opens an existing vault in the locked state.
+// Load recovers abandoned changes before reading metadata, then returns locked.
 func Load(configDir string) (*Vault, error) {
-	v := layout(configDir)
-	raw, err := os.ReadFile(v.metaPath)
+	l, err := fstxn.Acquire(configDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, ErrNotInited
-		}
 		return nil, err
 	}
-	var m meta
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, fmt.Errorf("vault.meta is corrupt: %w", err)
+	defer l.Close()
+	return LoadLocked(l)
+}
+
+func LoadLocked(l *fstxn.Lock) (*Vault, error) {
+	m, err := readMeta(l)
+	if err != nil {
+		return nil, err
 	}
 	rec, err := age.ParseX25519Recipient(m.Recipient)
 	if err != nil {
-		return nil, fmt.Errorf("vault.meta recipient is corrupt: %w", err)
+		return nil, err
 	}
+	v := layout(l.Dir())
 	v.recipient = rec
 	return v, nil
 }
 
-func layout(configDir string) *Vault {
-	return &Vault{
-		ConfigDir: configDir,
-		Dir:       filepath.Join(configDir, "vault"),
-		LocalDir:  filepath.Join(configDir, "local"),
-		metaPath:  filepath.Join(configDir, "vault.meta"),
+func readMeta(l *fstxn.Lock) (meta, error) {
+	var m meta
+	raw, err := l.ReadFile("vault.meta")
+	if os.IsNotExist(err) {
+		return m, ErrNotInited
 	}
+	if err != nil {
+		return m, err
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return m, fmt.Errorf("vault.meta is corrupt: %w", err)
+	}
+	if m.Version != metaVersion {
+		return m, fmt.Errorf("unsupported vault.meta version %d", m.Version)
+	}
+	if _, err := age.ParseX25519Recipient(m.Recipient); err != nil {
+		return m, fmt.Errorf("vault.meta recipient is corrupt: %w", err)
+	}
+	ct, err := debase64(m.Canary)
+	if err != nil || !bytes.HasPrefix(ct, []byte(AgeHeader+"\n")) {
+		return m, errors.New("vault.meta canary is corrupt")
+	}
+	if _, err := time.Parse(time.RFC3339, m.CreatedAt); err != nil {
+		return m, errors.New("vault.meta creation date is corrupt")
+	}
+	return m, nil
 }
 
-func (v *Vault) writeMeta(rec *age.X25519Recipient) error {
-	for _, d := range []string{v.ConfigDir, v.Dir, v.LocalDir} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return err
-		}
+func metadataChange(rec *age.X25519Recipient) (fstxn.Change, error) {
+	ct, err := encryptTo(rec, []byte(canaryText))
+	if err != nil {
+		return fstxn.Change{}, err
 	}
-	canary, err := encryptTo(rec, []byte(canaryText))
+	raw, err := json.MarshalIndent(meta{Version: metaVersion, Recipient: rec.String(), Canary: base64std(ct), CreatedAt: time.Now().UTC().Format(time.RFC3339)}, "", "  ")
+	return fstxn.Change{Path: "vault.meta", Data: raw}, err
+}
+
+// CheckCurrentLocked prevents an old in-memory recipient from writing secrets
+// after another process rotates or sync replaces vault.meta. It never locks.
+func (v *Vault) CheckCurrentLocked(l *fstxn.Lock) error {
+	if l.Dir() != v.ConfigDir {
+		return errors.New("vault and storage lock directories differ")
+	}
+	m, err := readMeta(l)
 	if err != nil {
 		return err
 	}
-	m := meta{
-		Version:   metaVersion,
-		Recipient: rec.String(),
-		Canary:    base64std(canary),
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	if v.recipient == nil || m.Recipient != v.recipient.String() {
+		return ErrStale
 	}
-	raw, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	return atomicWrite(v.metaPath, raw, 0o600)
+	return nil
 }
 
-// Unlock verifies the identity against the stored recipient and arms decryption.
 func (v *Vault) Unlock(identityStr string) error {
-	// Deliberately opaque: parse errors must never echo fragments of the
-	// (secret) input into a rendered/logged message.
 	id, err := age.ParseX25519Identity(strings.TrimSpace(identityStr))
 	if err != nil {
 		return errors.New("not a valid key")
@@ -150,9 +194,6 @@ func (v *Vault) Unlock(identityStr string) error {
 func (v *Vault) Unlocked() bool    { return v.identity != nil }
 func (v *Vault) Recipient() string { return v.recipient.String() }
 func (v *Vault) Lock()             { v.identity = nil }
-
-// Identity returns the unlocked identity string — for wrapping into a
-// hardware-gated local copy (keychain, security key), never for display.
 func (v *Vault) Identity() (string, error) {
 	if v.identity == nil {
 		return "", ErrLocked
@@ -160,214 +201,273 @@ func (v *Vault) Identity() (string, error) {
 	return v.identity.String(), nil
 }
 
-// Put encrypts and stores a synced secret. Works while locked.
-func (v *Vault) Put(name string, secret []byte) error { return v.put(v.Dir, name, secret) }
-
-// PutLocal stores a machine-local secret (never synced).
-func (v *Vault) PutLocal(name string, secret []byte) error { return v.put(v.LocalDir, name, secret) }
-
-func (v *Vault) put(dir, name string, secret []byte) error {
+func secretPath(name string, local bool) (string, error) {
 	if err := checkName(name); err != nil {
-		return err
+		return "", err
+	}
+	if local && strings.EqualFold(name, "master-key.fido2") {
+		return "", errors.New("FIDO master-key envelope is not a vault local secret")
+	}
+	dir := "vault"
+	if local {
+		dir = "local"
+	}
+	return dir + "/" + name + ".age", nil
+}
+
+// SecretChangeLocked encrypts in memory and returns a ciphertext-only change for
+// a larger transaction. It verifies the on-disk recipient under the given lock.
+func (v *Vault) SecretChangeLocked(l *fstxn.Lock, name string, secret []byte, local bool) (fstxn.Change, error) {
+	p, err := secretPath(name, local)
+	if err != nil {
+		return fstxn.Change{}, err
+	}
+	if err := v.CheckCurrentLocked(l); err != nil {
+		return fstxn.Change{}, err
 	}
 	ct, err := encryptTo(v.recipient, secret)
+	return fstxn.Change{Path: p, Data: ct}, err
+}
+
+// DeleteChange returns a validated deletion; callers composing a transaction
+// must also call CheckCurrentLocked before applying vault changes.
+func DeleteChange(name string, local bool) (fstxn.Change, error) {
+	p, err := secretPath(name, local)
+	return fstxn.Change{Path: p, Delete: true}, err
+}
+
+func (v *Vault) Put(name string, secret []byte) error      { return v.put(name, secret, false) }
+func (v *Vault) PutLocal(name string, secret []byte) error { return v.put(name, secret, true) }
+func (v *Vault) put(name string, secret []byte, local bool) error {
+	l, err := fstxn.Acquire(v.ConfigDir)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	defer l.Close()
+	c, err := v.SecretChangeLocked(l, name, secret, local)
+	if err != nil {
 		return err
 	}
-	return atomicWrite(filepath.Join(dir, name+".age"), ct, 0o600)
+	return l.Apply([]fstxn.Change{c})
 }
 
-// Get decrypts a synced secret. Requires Unlock.
-func (v *Vault) Get(name string) ([]byte, error) { return v.get(v.Dir, name) }
+func (v *Vault) Get(name string) ([]byte, error)      { return v.get(name, false) }
+func (v *Vault) GetLocal(name string) ([]byte, error) { return v.get(name, true) }
+func (v *Vault) get(name string, local bool) ([]byte, error) {
+	l, err := fstxn.Acquire(v.ConfigDir)
+	if err != nil {
+		return nil, err
+	}
+	defer l.Close()
+	return v.GetLocked(l, name, local)
+}
 
-// GetLocal decrypts a machine-local secret. Requires Unlock.
-func (v *Vault) GetLocal(name string) ([]byte, error) { return v.get(v.LocalDir, name) }
-
-func (v *Vault) get(dir, name string) ([]byte, error) {
-	if err := checkName(name); err != nil {
+func (v *Vault) GetLocked(l *fstxn.Lock, name string, local bool) ([]byte, error) {
+	p, err := secretPath(name, local)
+	if err != nil {
 		return nil, err
 	}
 	if v.identity == nil {
 		return nil, ErrLocked
 	}
-	ct, err := os.ReadFile(filepath.Join(dir, name+".age"))
+	if err := v.CheckCurrentLocked(l); err != nil {
+		return nil, err
+	}
+	ct, err := l.ReadFile(p)
+	if os.IsNotExist(err) {
+		return nil, ErrNotFound
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, ErrNotFound
-		}
 		return nil, err
 	}
 	return decryptWith(v.identity, ct)
 }
 
-func (v *Vault) Has(name string) bool {
-	if checkName(name) != nil {
+func (v *Vault) Has(name string) bool      { return v.has(name, false) }
+func (v *Vault) HasLocal(name string) bool { return v.has(name, true) }
+func (v *Vault) has(name string, local bool) bool {
+	l, err := fstxn.Acquire(v.ConfigDir)
+	if err != nil {
 		return false
 	}
-	_, err := os.Stat(filepath.Join(v.Dir, name+".age"))
-	return err == nil
+	defer l.Close()
+	return v.HasLocked(l, name, local) == nil
 }
 
-func (v *Vault) HasLocal(name string) bool {
-	if checkName(name) != nil {
-		return false
+// HasLocked checks for a required regular ciphertext file without unlocking.
+// It returns ErrNotFound for absence and preserves unsafe-path/IO diagnostics.
+func (v *Vault) HasLocked(l *fstxn.Lock, name string, local bool) error {
+	p, err := secretPath(name, local)
+	if err != nil {
+		return err
 	}
-	_, err := os.Stat(filepath.Join(v.LocalDir, name+".age"))
-	return err == nil
+	if err := v.CheckCurrentLocked(l); err != nil {
+		return err
+	}
+	ct, err := l.ReadFile(p)
+	if os.IsNotExist(err) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if !bytes.HasPrefix(ct, []byte(AgeHeader+"\n")) {
+		return fmt.Errorf("%s: not age ciphertext", p)
+	}
+	return nil
 }
 
 func (v *Vault) Delete(name string) error {
-	if err := checkName(name); err != nil {
+	l, err := fstxn.Acquire(v.ConfigDir)
+	if err != nil {
 		return err
 	}
-	err := os.Remove(filepath.Join(v.Dir, name+".age"))
-	if os.IsNotExist(err) {
-		return nil
+	defer l.Close()
+	if err := v.CheckCurrentLocked(l); err != nil {
+		return err
 	}
-	return err
+	c, err := DeleteChange(name, false)
+	if err != nil {
+		return err
+	}
+	return l.Apply([]fstxn.Change{c})
 }
 
-// List returns the names of all synced secrets.
 func (v *Vault) List() ([]string, error) {
-	ents, err := os.ReadDir(v.Dir)
+	l, err := fstxn.Acquire(v.ConfigDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
+		return nil, err
+	}
+	defer l.Close()
+	if err := v.CheckCurrentLocked(l); err != nil {
+		return nil, err
+	}
+	paths, err := secretPaths(l, false)
+	if err != nil {
 		return nil, err
 	}
 	var names []string
-	for _, e := range ents {
-		if n, ok := strings.CutSuffix(e.Name(), ".age"); ok && !e.IsDir() {
-			names = append(names, n)
+	for _, p := range paths {
+		if strings.HasPrefix(p, "vault/") {
+			names = append(names, strings.TrimSuffix(strings.TrimPrefix(p, "vault/"), ".age"))
 		}
 	}
 	return names, nil
 }
 
-// VerifyAll decrypts the canary and every secret in both dirs; used by doctor.
+func secretPaths(l *fstxn.Lock, includeFIDO bool) ([]string, error) {
+	var paths []string
+	for _, dir := range []string{"vault", "local"} {
+		entries, err := l.ReadDir(dir)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			p := dir + "/" + e.Name()
+			fido := strings.EqualFold(p, fidoKeyPath)
+			if !strings.HasSuffix(e.Name(), ".age") && !fido {
+				continue
+			}
+			if err := checkName(e.Name()[:len(e.Name())-len(".age")]); err != nil {
+				return nil, err
+			}
+			// Includes the FIDO path in safety checks even when not decrypted.
+			if _, err := l.ReadFile(p); err != nil {
+				return nil, err
+			}
+			if !includeFIDO && fido {
+				continue
+			}
+			paths = append(paths, p)
+		}
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+// VerifyAll verifies vault-owned ciphertext only. FIDO's scrypt envelope cannot
+// be authenticated with a vault identity; its hardware ceremony is separate.
 func (v *Vault) VerifyAll() error {
+	l, err := fstxn.Acquire(v.ConfigDir)
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	return v.VerifyAllLocked(l)
+}
+
+func (v *Vault) VerifyAllLocked(l *fstxn.Lock) error {
 	if v.identity == nil {
 		return ErrLocked
 	}
-	raw, err := os.ReadFile(v.metaPath)
+	if err := v.CheckCurrentLocked(l); err != nil {
+		return err
+	}
+	m, err := readMeta(l)
 	if err != nil {
 		return err
 	}
-	var m meta
-	if err := json.Unmarshal(raw, &m); err != nil {
+	ct, _ := debase64(m.Canary)
+	pt, err := decryptWith(v.identity, ct)
+	valid := string(pt) == canaryText
+	wipe(pt)
+	if err != nil || !valid {
+		return errors.New("canary check failed")
+	}
+	paths, err := secretPaths(l, false)
+	if err != nil {
 		return err
 	}
-	can, err := debase64(m.Canary)
-	if err != nil {
-		return fmt.Errorf("canary corrupt: %w", err)
-	}
-	pt, err := decryptWith(v.identity, can)
-	if err != nil || string(pt) != canaryText {
-		return fmt.Errorf("canary check failed: %v", err)
-	}
-	for _, dir := range []string{v.Dir, v.LocalDir} {
-		ents, err := os.ReadDir(dir)
+	for _, p := range paths {
+		ct, err := l.ReadFile(p)
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
 			return err
 		}
-		for _, e := range ents {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".age") {
-				continue
-			}
-			ct, err := os.ReadFile(filepath.Join(dir, e.Name()))
-			if err != nil {
-				return err
-			}
-			if _, err := decryptWith(v.identity, ct); err != nil {
-				return fmt.Errorf("%s: %w", e.Name(), err)
-			}
+		pt, err := decryptWith(v.identity, ct)
+		wipe(pt)
+		if err != nil {
+			return fmt.Errorf("%s: %w", p, err)
 		}
 	}
 	return nil
 }
 
-// Rekey decrypts every secret with the current identity, generates a fresh
-// identity, re-encrypts everything, and returns the new identity string for
-// one-time display.
-func (v *Vault) Rekey() (string, error) {
-	if v.identity == nil {
-		return "", ErrLocked
-	}
-	newID, err := age.GenerateX25519Identity()
-	if err != nil {
-		return "", err
-	}
-	// Decrypt everything into memory first so a failure can't leave a
-	// half-rekeyed vault.
-	type entry struct {
-		dir, name string
-		plaintext []byte
-	}
-	var entries []entry
-	for _, dir := range []string{v.Dir, v.LocalDir} {
-		ents, err := os.ReadDir(dir)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return "", err
-		}
-		for _, e := range ents {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".age") {
-				continue
-			}
-			ct, err := os.ReadFile(filepath.Join(dir, e.Name()))
-			if err != nil {
-				return "", err
-			}
-			pt, err := decryptWith(v.identity, ct)
-			if err != nil {
-				return "", fmt.Errorf("rekey aborted, %s failed to decrypt: %w", e.Name(), err)
-			}
-			entries = append(entries, entry{dir, e.Name(), pt})
-		}
-	}
-	for _, en := range entries {
-		ct, err := encryptTo(newID.Recipient(), en.plaintext)
-		wipe(en.plaintext)
-		if err != nil {
-			return "", err
-		}
-		if err := atomicWrite(filepath.Join(en.dir, en.name), ct, 0o600); err != nil {
-			return "", err
-		}
-	}
-	if err := v.writeMeta(newID.Recipient()); err != nil {
-		return "", err
-	}
-	v.recipient = newID.Recipient()
-	v.identity = newID
-	return newID.String(), nil
-}
-
-// Reset wipes all secrets and mints a new identity — the lost-key escape
-// hatch. Profile metadata is untouched; every credential must be re-entered.
+// Reset is the explicit lost-key escape hatch. Changes are recoverable as one
+// transaction; profile metadata and the persistent lock inode are preserved.
 func Reset(configDir string) (*Vault, string, error) {
-	v := layout(configDir)
-	for _, d := range []string{v.Dir, v.LocalDir} {
-		if err := os.RemoveAll(d); err != nil {
-			return nil, "", err
-		}
-	}
-	if err := os.Remove(v.metaPath); err != nil && !os.IsNotExist(err) {
+	l, err := fstxn.Acquire(configDir)
+	if err != nil {
 		return nil, "", err
 	}
-	return Init(configDir)
+	defer l.Close()
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		return nil, "", err
+	}
+	paths, err := secretPaths(l, true)
+	if err != nil {
+		return nil, "", err
+	}
+	var changes []fstxn.Change
+	for _, p := range paths {
+		changes = append(changes, fstxn.Change{Path: p, Delete: true})
+	}
+	changes = append(changes, fstxn.Change{Path: fidoMetaPath, Delete: true})
+	c, err := metadataChange(id.Recipient())
+	if err != nil {
+		return nil, "", err
+	}
+	changes = append(changes, c)
+	if err := l.Apply(changes); err != nil {
+		return nil, "", err
+	}
+	v := layout(l.Dir())
+	v.recipient, v.identity = id.Recipient(), id
+	return v, id.String(), nil
 }
-
-// --- helpers ---
 
 func checkName(name string) error {
 	if !secretNameRe.MatchString(name) || strings.Contains(name, "..") {
@@ -396,35 +496,15 @@ func decryptWith(id age.Identity, ciphertext []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return io.ReadAll(r)
-}
-
-// atomicWrite writes to a temp file in the same dir then renames, so a crash
-// can never leave a truncated secret, and perms are set before content lands.
-func atomicWrite(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, ".tmp-*")
+	pt, err := io.ReadAll(r)
 	if err != nil {
-		return err
+		wipe(pt)
+		return nil, err
 	}
-	tmp := f.Name()
-	defer os.Remove(tmp)
-	if err := f.Chmod(perm); err != nil {
-		f.Close()
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return pt, nil
 }
 
-// wipe zeroes a secret buffer. Best-effort: Go's GC may have copied it, but
-// this shrinks the window plaintext sits in memory.
+// Best effort: Go may have made other copies, but don't retain plaintext buffers.
 func wipe(b []byte) {
 	for i := range b {
 		b[i] = 0

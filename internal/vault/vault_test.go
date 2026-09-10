@@ -108,9 +108,14 @@ func TestRekey(t *testing.T) {
 	if err := v.PutLocal("github-token", []byte("ghp_x")); err != nil {
 		t.Fatal(err)
 	}
-	newKey, err := v.Rekey()
+	rotation, err := v.PrepareRekey()
 	if err != nil {
 		t.Fatalf("Rekey: %v", err)
+	}
+	defer rotation.Close()
+	newKey := rotation.Key()
+	if err := rotation.Commit(); err != nil {
+		t.Fatal(err)
 	}
 	if newKey == oldKey {
 		t.Fatal("rekey returned same identity")

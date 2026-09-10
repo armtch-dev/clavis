@@ -12,6 +12,7 @@ import (
 
 	"github.com/armtch-dev/clavis/internal/cli"
 	"github.com/armtch-dev/clavis/internal/config"
+	"github.com/armtch-dev/clavis/internal/fstxn"
 	"github.com/armtch-dev/clavis/internal/profile"
 	"github.com/armtch-dev/clavis/internal/script"
 	"github.com/armtch-dev/clavis/internal/theme"
@@ -104,23 +105,29 @@ func run() error {
 
 // buildModel loads (or first-run initializes) everything the TUI needs.
 func buildModel(cfgDir string) (*tui.Model, error) {
-	cfg, err := config.Load(cfgDir)
+	// Recover before config or any metadata is consumed, and read one snapshot.
+	l, err := fstxn.Acquire(cfgDir)
 	if err != nil {
 		return nil, err
 	}
-	store, err := profile.LoadStore(cfgDir)
+	defer l.Close()
+	cfg, err := config.LoadLocked(l)
 	if err != nil {
 		return nil, err
 	}
-	idents, err := profile.LoadIdentities(cfgDir)
+	store, err := profile.LoadStoreLocked(l)
 	if err != nil {
 		return nil, err
 	}
-	scripts, err := script.LoadStore(cfgDir)
+	idents, err := profile.LoadIdentitiesLocked(l)
 	if err != nil {
 		return nil, err
 	}
-	v, err := vault.Load(cfgDir)
+	scripts, err := script.LoadStoreLocked(l)
+	if err != nil {
+		return nil, err
+	}
+	v, err := vault.LoadLocked(l)
 	if err == vault.ErrNotInited {
 		v = nil // first run: the welcome screen decides new-vault vs restore-from-git
 	} else if err != nil {

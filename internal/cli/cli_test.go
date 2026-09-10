@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
+	"io"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -271,5 +274,182 @@ func TestUninstallRemovesEverything(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "NOT touched") {
 		t.Errorf("output should reassure that the synced remote survives:\n%s", buf.String())
+	}
+}
+
+type failAfterWriter struct{ remaining int }
+
+func (w *failAfterWriter) Write(p []byte) (int, error) {
+	if len(p) > w.remaining {
+		n := w.remaining
+		w.remaining = 0
+		return n, io.ErrClosedPipe
+	}
+	w.remaining -= len(p)
+	return len(p), nil
+}
+
+type statusFailureWriter struct{ bytes.Buffer }
+
+func (w *statusFailureWriter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("Vault rotated.")) {
+		return 0, io.ErrClosedPipe
+	}
+	return w.Buffer.Write(p)
+}
+
+type flushFailureWriter struct{ bytes.Buffer }
+
+func (w *flushFailureWriter) Flush() error { return io.ErrClosedPipe }
+
+func TestRekeyAcknowledgedKeySurvivesFailureAfterCommit(t *testing.T) {
+	dir := t.TempDir()
+	v, old, err := vault.Init(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Put("p1.pass", []byte("retained")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(vault.EnvKey, old)
+	out := &statusFailureWriter{}
+	if err := VaultRekeyWithInput(out, strings.NewReader("saved\n"), dir); err == nil || !strings.Contains(err.Error(), "committed") {
+		t.Fatal("expected explicit committed/status-output error", err)
+	}
+	var key string
+	for _, s := range strings.Fields(out.String()) {
+		if strings.HasPrefix(s, "AGE-SECRET-KEY-") {
+			key = s
+			break
+		}
+	}
+	fresh, err := vault.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fresh.Unlock(key); err != nil {
+		t.Fatal("saved key unusable after commit/status failure", err)
+	}
+	got, err := fresh.Get("p1.pass")
+	if err != nil || string(got) != "retained" {
+		t.Fatal("lost credential", err)
+	}
+}
+
+func TestRekeyFlushFailureAbortsBeforeRetirement(t *testing.T) {
+	dir := t.TempDir()
+	_, old, err := vault.Init(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(vault.EnvKey, old)
+	if err := VaultRekeyWithInput(&flushFailureWriter{}, strings.NewReader("saved\n"), dir); err == nil {
+		t.Fatal("flush failure ignored")
+	}
+	fresh, err := vault.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fresh.Unlock(old); err != nil {
+		t.Fatal("undelivered key retired old generation", err)
+	}
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (r readerFunc) Read(p []byte) (int, error) { return r(p) }
+
+func TestRekeyBufferedPromptAndPipedConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	_, key, err := vault.Init(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(vault.EnvKey, "")
+	t.Setenv(vault.EnvKeyFile, "")
+	t.Setenv("PATH", t.TempDir()) // No access to the real Keychain resolver.
+	var out bytes.Buffer
+	w := bufio.NewWriter(&out)
+	source := strings.NewReader(key + "\nsaved\n")
+	r := readerFunc(func(p []byte) (int, error) {
+		if !strings.Contains(out.String(), "Enter clavis master key") {
+			return 0, errors.New("key prompt not delivered before input")
+		}
+		return source.Read(p)
+	})
+	if err := VaultRekeyWithInput(w, r, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Vault rotated") {
+		t.Fatal("piped acknowledgement was lost")
+	}
+}
+
+func TestVaultRekeyOutputAndAcknowledgementGate(t *testing.T) {
+	for _, tc := range []struct {
+		name, input string
+		failOutput  bool
+	}{
+		{"output interrupted", "saved\n", true}, {"not saved", "no\n", false}, {"EOF", "", false}, {"saved", "saved\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			v, old, err := vault.Init(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := v.Put("p1.pass", []byte("credential")); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(vault.EnvKey, old)
+			var out bytes.Buffer
+			var w io.Writer = &out
+			if tc.failOutput {
+				w = &failAfterWriter{remaining: 120}
+			}
+			err = VaultRekeyWithInput(w, strings.NewReader(tc.input), dir)
+			fresh, e := vault.Load(dir)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if tc.name != "saved" {
+				if err == nil {
+					t.Fatal("rotation proceeded without successful output/acknowledgement")
+				}
+				if e := fresh.Unlock(old); e != nil {
+					t.Fatal("old generation lost", e)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				var newKey string
+				for _, word := range strings.Fields(out.String()) {
+					if strings.HasPrefix(word, "AGE-SECRET-KEY-") {
+						newKey = word
+						break
+					}
+				}
+				if newKey == "" {
+					t.Fatal("new key not displayed")
+				}
+				if !errors.Is(fresh.Unlock(old), vault.ErrWrongKey) {
+					t.Fatal("old key still active")
+				}
+				if e := fresh.Unlock(newKey); e != nil {
+					t.Fatal("displayed key unusable", e)
+				}
+				if !strings.Contains(out.String(), "re-enroll") {
+					t.Fatal("missing hardware enrollment instructions")
+				}
+			}
+			got, e := fresh.Get("p1.pass")
+			if e != nil || string(got) != "credential" {
+				t.Fatalf("credential lost: %v", e)
+			}
+		})
 	}
 }

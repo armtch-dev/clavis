@@ -112,18 +112,39 @@ func Doctor(w io.Writer, configDir string) error {
 	return nil
 }
 
-// VaultRekey unlocks the vault, generates a fresh identity, re-encrypts every
-// secret under it, and prints the new key. The old key becomes permanently
-// useless — callers on other machines must re-sync and re-enter the new key.
+// VaultRekey displays a prepared key and asks for acknowledgement before commit.
 func VaultRekey(w io.Writer, configDir string) error {
+	return VaultRekeyWithInput(w, os.Stdin, configDir)
+}
+
+// VaultRekeyWithInput shares one buffered reader across key and confirmation
+// prompts, including piped input. No destructive retirement precedes successful
+// key output (and Flush, where supported) plus an explicit "saved" response.
+func VaultRekeyWithInput(w io.Writer, r io.Reader, configDir string) error {
 	v, err := vault.Load(configDir)
 	if err != nil {
 		return err
 	}
 
+	input := bufio.NewReader(r)
 	identity, source := vault.ResolveIdentity()
 	if identity == "" {
-		identity, err = promptKey(w)
+		if r == os.Stdin && term.IsTerminal(int(os.Stdin.Fd())) {
+			identity, err = promptKey(w)
+		} else {
+			if _, err = fmt.Fprint(w, "Enter clavis master key (AGE-SECRET-KEY-1...): "); err != nil {
+				return err
+			}
+			if f, ok := w.(interface{ Flush() error }); ok {
+				if err := f.Flush(); err != nil {
+					return err
+				}
+			}
+			identity, err = input.ReadString('\n')
+			if errors.Is(err, io.EOF) {
+				err = nil
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("reading master key: %w", err)
 		}
@@ -132,18 +153,42 @@ func VaultRekey(w io.Writer, configDir string) error {
 	if err := v.Unlock(identity); err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "vault unlocked (key via %s)\n", source)
+	if _, err := fmt.Fprintf(w, "vault unlocked (key via %s)\n", source); err != nil {
+		return err
+	}
 
-	newIdentity, err := v.Rekey()
+	rotation, err := v.PrepareRekey()
 	if err != nil {
 		return fmt.Errorf("rekey failed: %w", err)
 	}
+	defer rotation.Close()
+	newIdentity := rotation.Key()
+	if err := PrintKeyBanner(w, newIdentity); err != nil {
+		return fmt.Errorf("new key output failed; rotation aborted: %w", err)
+	}
+	if _, err := fmt.Fprint(w, "Store the NEW key now. The old vault is still active.\nType \"saved\" only after storing the new key outside this machine: "); err != nil {
+		return err
+	}
+	if f, ok := w.(interface{ Flush() error }); ok {
+		if err := f.Flush(); err != nil {
+			return fmt.Errorf("new key output failed; rotation aborted: %w", err)
+		}
+	}
+	line, err := input.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("rotation aborted before key acknowledgement: %w", err)
+	}
+	if strings.TrimSpace(line) != "saved" {
+		return errors.New("rotation aborted: new key was not acknowledged as saved")
+	}
+	if err := rotation.Commit(); err != nil {
+		return fmt.Errorf("rekey failed (retain both keys and the local recovery journal; storage recovery may be needed): %w", err)
+	}
+	if _, err := fmt.Fprintln(w, "\nVault rotated. The new key unlocks the current generation; retain the old key for historical Git backups.\nA ciphertext-only recovery backup is kept locally until the next storage change.\nStale FIDO enrollment was removed. Unlock with the new key and re-enroll your security key in Settings.\nSync from this machine, then use the NEW key on every other machine. Update CLAVIS_KEY, key files, or cached keys as applicable."); err != nil {
+		return fmt.Errorf("rotation committed using the key you saved, but status output failed: %w", err)
+	}
 
-	PrintKeyBanner(w, newIdentity)
-	fmt.Fprintln(w, "The OLD master key is now permanently useless — every secret has been re-encrypted under the new one.")
-	fmt.Fprintln(w, "Run sync from this machine, then unlock with the NEW key on every other machine that shares this vault.")
-
-	if vault.HasKeychain() {
+	if source == "macOS Keychain" {
 		if err := vault.SaveToKeychain(newIdentity); err != nil {
 			fmt.Fprintf(w, "warning: failed to update macOS Keychain entry: %v\n", err)
 		} else {
@@ -348,18 +393,14 @@ func ImportSSHConfig(w io.Writer, configDir, path string) error {
 
 // PrintKeyBanner prints identity inside a hard-to-miss box, used whenever a
 // master key is first shown or replaced (init, rekey, reset).
-func PrintKeyBanner(w io.Writer, identity string) {
+func PrintKeyBanner(w io.Writer, identity string) error {
 	line := strings.Repeat("=", 70)
-	fmt.Fprintln(w, line)
-	fmt.Fprintln(w, "  YOUR CLAVIS MASTER KEY — SHOWN EXACTLY ONCE")
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  %s\n", identity)
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "  Store this OUTSIDE this machine — a password manager or printed")
-	fmt.Fprintln(w, "  copy in a safe, not a file on this disk. clavis never writes it")
-	fmt.Fprintln(w, "  anywhere. Without it, nobody, including you, can recover the")
-	fmt.Fprintln(w, "  vault's secrets.")
-	fmt.Fprintln(w, line)
+	banner := fmt.Sprintf("%s\n  YOUR CLAVIS MASTER KEY — SHOWN EXACTLY ONCE\n\n  %s\n\n  Store this OUTSIDE this machine — a password manager or printed\n  copy in a safe. Clavis never writes a plaintext key into its config.\n  Without this key, you cannot recover the vault's secrets.\n%s\n", line, identity, line)
+	n, err := io.WriteString(w, banner)
+	if err == nil && n != len(banner) {
+		err = io.ErrShortWrite
+	}
+	return err
 }
 
 // promptKey reads a master key from the terminal with no echo, falling back
