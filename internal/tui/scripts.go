@@ -84,6 +84,15 @@ func (s *scriptsModel) applicable() []script.Script {
 }
 
 func (s *scriptsModel) openEditor(sc *script.Script) {
+	if draft := s.app.scriptDraft; draft != nil {
+		if draft == s {
+			s.editing = true
+		} else {
+			s.errs = "draft retained — Escape, then D resumes it; X discards it"
+		}
+		return
+	}
+	s.app.scriptDraft = s
 	s.editing, s.errs = true, ""
 	s.editID = ""
 	s.metadataCheck = nil
@@ -243,7 +252,8 @@ func (m *Model) updateScriptEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := m.scriptsUI
 	switch key.Type {
 	case tea.KeyEsc:
-		s.editing, s.errs = false, ""
+		s.editing = false
+		s.errs = "draft retained for this session — D resumes from the host list"
 		return m, nil
 	case tea.KeyTab, tea.KeyShiftTab:
 		s.area.Blur()
@@ -262,6 +272,12 @@ func (m *Model) updateScriptEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case focusTags:
 			s.tags.Focus()
 		}
+		return m, nil
+	case tea.KeyCtrlN:
+		// Explicit copy recovery never drops the stale-write check on the original.
+		s.editID, s.metadataCheck = "", nil
+		m.staleScript = nil
+		s.errs = "draft is now a new copy — ctrl+s saves it"
 		return m, nil
 	case tea.KeyCtrlD, tea.KeyCtrlS:
 		release, err := m.mutationLock()

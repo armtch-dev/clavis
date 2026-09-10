@@ -277,6 +277,17 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "m":
 		m.scriptsUI = newScriptsManager(m)
 		m.screen = scrScripts
+	case "D":
+		if m.scriptDraft != nil {
+			m.scriptsUI = m.scriptDraft
+			m.scriptsUI.editing = true
+			m.screen = scrScripts
+		}
+	case "X":
+		if m.scriptDraft != nil {
+			m.scriptDraft = nil
+			m.setStatus(statusInfo, "retained script draft discarded")
+		}
 	case "y":
 		m.identsUI = &identsModel{}
 		m.screen = scrIdentities
