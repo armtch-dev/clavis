@@ -38,6 +38,10 @@ func (s sortMode) String() string {
 // visible returns the filtered profile list (case-insensitive substring on
 // name, host, user, tags — sshs-style), in the current sort order.
 func (m *Model) visible() []profile.Profile {
+	c := &m.listCache
+	if c.valid && c.store == m.store && c.length == len(m.store.Profiles) && c.filter == m.filter && c.mode == m.sortMode {
+		return c.profiles
+	}
 	base := m.store.Profiles
 	if m.filter != "" {
 		q := strings.ToLower(m.filter)
@@ -50,7 +54,10 @@ func (m *Model) visible() []profile.Profile {
 		}
 		base = out
 	}
-	return m.sortProfiles(base)
+	c.profiles = m.sortProfiles(base)
+	c.valid, c.store, c.length, c.filter, c.mode = true, m.store, len(m.store.Profiles), m.filter, m.sortMode
+	c.groups, c.entries = nil, nil
+	return c.profiles
 }
 
 type groupCount struct{ total, up, down int }
@@ -766,6 +773,9 @@ type listEntry struct {
 // listEntries expands vis into display lines, inserting a heading before
 // each category group (grouping is always active).
 func (m *Model) listEntries(vis []profile.Profile) []listEntry {
+	if m.listCache.entries != nil {
+		return m.listCache.entries
+	}
 	out := make([]listEntry, 0, len(vis)+4)
 	prev := ""
 	for i, p := range vis {
@@ -775,6 +785,7 @@ func (m *Model) listEntries(vis []profile.Profile) []listEntry {
 		}
 		out = append(out, listEntry{idx: i})
 	}
+	m.listCache.entries = out
 	return out
 }
 
@@ -831,20 +842,24 @@ func (m *Model) renderRowRegion(vis []profile.Profile, l listLayout, avail int) 
 // `cloud · 2 hosts · 2 up` — whitespace does the separating, no rule fill.
 // Counts come from the group's visible rows.
 func (m *Model) groupHeading(name string, vis []profile.Profile, l listLayout) string {
-	total, up, down := 0, 0, 0
-	for _, p := range vis {
-		if groupCategory(p) != name {
-			continue
-		}
-		total++
-		if st, ok := m.statuses[p.ID]; ok {
-			if st.Reachable {
-				up++
-			} else {
-				down++
+	if m.listCache.groups == nil {
+		m.listCache.groups = map[string]groupCount{}
+		for _, p := range vis {
+			g := groupCategory(p)
+			c := m.listCache.groups[g]
+			c.total++
+			if st, ok := m.statuses[p.ID]; ok {
+				if st.Reachable {
+					c.up++
+				} else {
+					c.down++
+				}
 			}
+			m.listCache.groups[g] = c
 		}
 	}
+	c := m.listCache.groups[name]
+	total, up, down := c.total, c.up, c.down
 	hosts := fmt.Sprintf("%d host", total)
 	if total != 1 {
 		hosts += "s"
