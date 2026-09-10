@@ -80,6 +80,9 @@ func TestWelcomeRestoreFlow(t *testing.T) {
 		t.Fatal("bogus key must not unlock")
 	}
 	typeInto(t, m, identity)
+	// Capability discovery now completes through a command. Supply a synthetic
+	// snapshot; this restore fixture must not inspect physical hardware.
+	m.dispatch(restoreOfferMsg{owner: m.welcome, ready: false})
 	// A one-time local-auth offer (Keychain or security-key enrollment,
 	// depending on OS and whether a real key is plugged in right now) may
 	// follow the unlock; decline it — a test must never write into the

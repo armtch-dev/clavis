@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -14,10 +15,12 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/term"
 
+	"github.com/armtch-dev/clavis/internal/fstxn"
 	"github.com/armtch-dev/clavis/internal/profile"
 	"github.com/armtch-dev/clavis/internal/script"
 	"github.com/armtch-dev/clavis/internal/sshx"
 	"github.com/armtch-dev/clavis/internal/theme"
+	"github.com/muesli/cancelreader"
 )
 
 // scriptsModel is both script screens, told apart by profileID:
@@ -30,17 +33,20 @@ type scriptsModel struct {
 	app                    *Model
 	profileID, profileName string // empty in manage mode
 	profileTags            []string
+	target                 profile.Profile // endpoint captured with a resumable run draft
 
 	cursor     int
 	confirmDel bool
+	deleteID   string
 
-	editing bool   // editor pane active (new / edit / paste)
-	editID  string // "" while creating
-	name    textinput.Model
-	tags    textinput.Model
-	area    textarea.Model
-	focus   int // one of focusContent/focusName/focusTags
-	errs    string
+	editing       bool   // editor pane active (new / edit / paste)
+	editID        string // "" while creating
+	name          textinput.Model
+	tags          textinput.Model
+	area          textarea.Model
+	focus         int // one of focusContent/focusName/focusTags
+	errs          string
+	metadataCheck func(*fstxn.Lock) error
 }
 
 // Editor focus cycle: the script body first (paste target), then the metadata.
@@ -51,7 +57,7 @@ const (
 )
 
 func newScripts(app *Model, p *profile.Profile) *scriptsModel {
-	return &scriptsModel{app: app, profileID: p.ID, profileName: p.Name, profileTags: p.Tags}
+	return &scriptsModel{app: app, profileID: p.ID, profileName: p.Name, profileTags: p.Tags, target: app.effective(*p)}
 }
 
 func newScriptsManager(app *Model) *scriptsModel {
@@ -80,6 +86,10 @@ func (s *scriptsModel) applicable() []script.Script {
 func (s *scriptsModel) openEditor(sc *script.Script) {
 	s.editing, s.errs = true, ""
 	s.editID = ""
+	s.metadataCheck = nil
+	if s.app.staleScript == s {
+		s.app.staleScript = nil
+	}
 
 	ti := textinput.New()
 	ti.Prompt = "› "
@@ -107,6 +117,8 @@ func (s *scriptsModel) openEditor(sc *script.Script) {
 	ta.CharLimit = 0
 
 	if sc != nil {
+		snapshot := *s.app.scripts
+		s.metadataCheck = snapshot.CheckCurrentLocked
 		s.editID = sc.ID
 		ti.SetValue(sc.Name)
 		tg.SetValue(strings.Join(sc.Tags, " "))
@@ -116,6 +128,7 @@ func (s *scriptsModel) openEditor(sc *script.Script) {
 	// tags can be filled in on save.
 	ta.Focus()
 	s.name, s.tags, s.area, s.focus = ti, tg, ta, focusContent
+	s.app.resizeEditors()
 }
 
 func (m *Model) updateScripts(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -140,17 +153,47 @@ func (m *Model) updateScriptPicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	list := s.applicable()
 
 	if s.confirmDel {
+		target := s.deleteID
+		s.confirmDel, s.deleteID = false, ""
 		if key.String() == "y" || key.String() == "Y" {
-			if s.cursor < len(list) {
-				if err := m.scripts.Remove(list[s.cursor].ID); err == nil {
-					m.setStatus(statusOK, "deleted script")
-				}
+			release, err := m.mutationLock()
+			if err != nil {
+				s.errs = err.Error()
+				m.setStatus(statusErr, "delete failed: "+err.Error())
+				return m, nil
 			}
+			defer release()
+			if m.syncing || m.persistenceErr != nil {
+				s.errs = "deletion paused — retry after sync/storage recovery"
+				return m, nil
+			}
+			if err := m.scripts.CheckCurrentLocked(m.uiLock); err != nil {
+				s.errs = err.Error()
+				return m, nil
+			}
+			if !s.manage() || target == "" || m.scripts.ByID(target) == nil {
+				s.errs = "script target changed — select it again"
+				return m, nil
+			}
+			err = m.mutate(func(state *diskState, l *fstxn.Lock) ([]fstxn.Change, error) {
+				if err := state.scripts.Remove(target); err != nil {
+					return nil, err
+				}
+				c, err := state.scripts.Change()
+				return []fstxn.Change{c}, err
+			})
+			if err != nil {
+				s.errs = err.Error()
+				m.setStatus(statusErr, "delete failed: "+err.Error())
+				return m, nil
+			}
+			s.errs = ""
+			m.setStatus(statusOK, "deleted script")
 			if n := len(s.applicable()); s.cursor >= n {
 				s.cursor = max(0, n-1)
 			}
 			s.confirmDel = false
-			return m, m.saveScripts("delete script")
+			return m, m.afterMutation("delete script")
 		}
 		s.confirmDel = false
 		return m, nil
@@ -178,6 +221,7 @@ func (m *Model) updateScriptPicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "d":
 		if s.manage() && s.cursor < len(list) {
 			s.confirmDel = true
+			s.deleteID = list[s.cursor].ID
 		}
 	case "enter":
 		if s.cursor >= len(list) {
@@ -189,9 +233,7 @@ func (m *Model) updateScriptPicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.connecting == "" {
 			sc := list[s.cursor]
-			m.scriptsUI = nil
-			m.screen = scrList
-			return m, m.startRunScript(s.profileID, sc.Name, sc.Content)
+			return m, m.startRunScript(s, sc.Name, sc.Content)
 		}
 	}
 	return m, nil
@@ -203,11 +245,15 @@ func (m *Model) updateScriptEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		s.editing, s.errs = false, ""
 		return m, nil
-	case tea.KeyTab:
+	case tea.KeyTab, tea.KeyShiftTab:
 		s.area.Blur()
 		s.name.Blur()
 		s.tags.Blur()
-		s.focus = (s.focus + 1) % 3
+		delta := 1
+		if key.Type == tea.KeyShiftTab {
+			delta = 2
+		}
+		s.focus = (s.focus + delta) % 3
 		switch s.focus {
 		case focusContent:
 			s.area.Focus()
@@ -217,22 +263,57 @@ func (m *Model) updateScriptEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.tags.Focus()
 		}
 		return m, nil
-	case tea.KeyCtrlD:
-		sc := script.Script{ID: s.editID, Name: s.name.Value(), Content: s.area.Value(),
-			Tags: script.ParseTags(s.tags.Value())}
-		var err error
-		if s.editID != "" {
-			err = m.scripts.Update(sc)
-		} else {
-			_, err = m.scripts.Add(sc)
-		}
+	case tea.KeyCtrlD, tea.KeyCtrlS:
+		release, err := m.mutationLock()
 		if err != nil {
+			s.errs = err.Error()
+			m.setStatus(statusErr, "save failed: "+err.Error())
+			return m, nil
+		}
+		defer release()
+		if m.syncing || m.staleScript == s {
+			s.errs = "sync or disk changes prevent saving — retain your input and reopen the edit"
+			return m, nil
+		}
+		if m.persistenceErr != nil {
+			s.errs = m.persistenceErr.Error()
+			return m, nil
+		}
+		if err := m.scripts.CheckCurrentLocked(m.uiLock); err != nil {
 			s.errs = err.Error()
 			return m, nil
 		}
-		s.editing = false
+		if s.metadataCheck != nil {
+			if err := s.metadataCheck(m.uiLock); err != nil {
+				s.errs = err.Error()
+				return m, nil
+			}
+		}
+		sc := script.Script{ID: s.editID, Name: s.name.Value(), Content: s.area.Value(),
+			Tags: script.ParseTags(s.tags.Value())}
+		err = m.mutate(func(state *diskState, l *fstxn.Lock) ([]fstxn.Change, error) {
+			if s.editID != "" {
+				err = state.scripts.Update(sc)
+			} else {
+				_, err = state.scripts.Add(sc)
+			}
+			if err != nil {
+				return nil, err
+			}
+			c, err := state.scripts.Change()
+			return []fstxn.Change{c}, err
+		})
+		if err != nil {
+			s.errs = err.Error()
+			m.setStatus(statusErr, "save failed: "+err.Error())
+			return m, nil
+		}
+		s.editing, s.errs = false, ""
+		if m.scriptDraft == s {
+			m.scriptDraft = nil
+		}
 		m.setStatus(statusOK, "saved script "+sc.Name)
-		return m, m.saveScripts("save script " + sc.Name)
+		return m, m.afterMutation("save script " + sc.Name)
 	case tea.KeyCtrlR:
 		// Run what's in the buffer once, without saving — the paste-and-go
 		// path. Only meaningful with a target host, i.e. not in the manager.
@@ -251,10 +332,7 @@ func (m *Model) updateScriptEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if name == "" {
 			name = "pasted script"
 		}
-		profileID := s.profileID
-		m.scriptsUI = nil
-		m.screen = scrList
-		return m, m.startRunScript(profileID, name, content)
+		return m, m.startRunScript(s, name, content)
 	}
 	var cmd tea.Cmd
 	switch s.focus {
@@ -344,9 +422,12 @@ func (s *scriptsModel) viewPicker(width, height int) string {
 			theme.Dim.Render(fmt.Sprintf("  %d more in the library don't apply to this host", hidden)), cw, "…") + "\n")
 	}
 
-	if s.confirmDel && s.cursor < len(list) {
-		b.WriteString("\n" + ansi.Truncate(theme.StatusErr.Render("delete “"+list[s.cursor].Name+"”? ")+
+	if sc := s.app.scripts.ByID(s.deleteID); s.confirmDel && sc != nil {
+		b.WriteString("\n" + ansi.Truncate(theme.StatusErr.Render("delete “"+sc.Name+"”? ")+
 			hintKeys([][2]string{{"y", "delete"}, {"any", "cancel"}}), cw, "…") + "\n")
+	}
+	if s.errs != "" {
+		b.WriteString("\n" + ansi.Truncate(theme.StatusErr.Render("✗ "+s.errs), cw, "…") + "\n")
 	}
 
 	b.WriteString("\n" + theme.Divider(cw) + "\n")
@@ -435,32 +516,39 @@ func firstLine(content string) string {
 
 // startRunScript mirrors startConnect: resolve creds, preflight in the TUI,
 // and only hand the terminal over once the host answers. The pending script
-// rides along in pendingConnect.
-func (m *Model) startRunScript(profileID, name, content string) tea.Cmd {
-	p := m.store.ByID(profileID)
+// rides along in pendingConnect. Both picker Enter and editor Ctrl+R validate
+// their captured effective target before closing the UI or resolving credentials.
+func (m *Model) startRunScript(s *scriptsModel, name, content string) tea.Cmd {
+	p := m.store.ByID(s.profileID)
 	if p == nil {
-		m.setStatus(statusErr, "profile no longer exists")
+		s.errs = "original target was deleted — draft retained; select a host again"
+		return nil
+	}
+	ep, original := m.effective(*p), s.target
+	// First contact may pin the same server. SSH still enforces the live pin.
+	original.HostKey, original.HostKeyFP = ep.HostKey, ep.HostKeyFP
+	if !sameTestTarget(ep, original) {
+		s.errs = "original target changed — draft retained; select a host again"
 		return nil
 	}
 	if p.ProxyJump != "" {
 		m.setStatus(statusErr, "script runs through a ProxyJump are not supported yet")
 		return nil
 	}
-	ep := m.effective(*p)
 	p = &ep
 	creds, err := m.credsFor(p)
 	if err != nil {
 		m.setStatus(statusErr, err.Error())
 		return nil
 	}
+	m.scriptsUI = nil
+	m.screen = scrList
+	m.cancelPending()
 	m.connecting = p.ID
 	m.pending = &pendingConnect{p: *p, creds: creds, script: &runScript{name: name, content: content}}
 	m.monitor.Suspend(p.ID, true)
 	m.setStatus(statusInfo, "running “"+name+"” on "+p.Name+"…")
-	addr := p.Addr()
-	return func() tea.Msg {
-		return preflightMsg{p.ID, sshx.Preflight(addr, preflightTimeout)}
-	}
+	return m.preflightCmd(m.pending)
 }
 
 // runScript is the script payload attached to a pending connect.
@@ -474,14 +562,15 @@ type scriptDoneMsg struct {
 	hostKeyLine string
 	summary     string
 	ok          bool
+	endpoint    profile.Profile
 }
 
 // scriptSessionCmd hands the terminal over to run the script; like a normal
 // session, probing stays suspended until the done message.
 func (m *Model) scriptSessionCmd(pc pendingConnect) tea.Cmd {
-	sess := &scriptSession{p: pc.p, creds: pc.creds, name: pc.script.name, content: pc.script.content}
+	sess := &scriptSession{p: pc.p, creds: pc.creds, name: pc.script.name, content: pc.script.content, ctx: m.networkContext()}
 	return tea.Exec(sess, func(error) tea.Msg {
-		return scriptDoneMsg{pc.p.ID, sess.fp, sess.keyLine, sess.summary, sess.ok}
+		return scriptDoneMsg{profileID: pc.p.ID, hostKeyFP: sess.fp, hostKeyLine: sess.keyLine, summary: sess.summary, ok: sess.ok, endpoint: pc.p}
 	})
 }
 
@@ -489,6 +578,7 @@ func (m *Model) scriptSessionCmd(pc pendingConnect) tea.Cmd {
 // streams the script's output to the real terminal, then blocks on a single
 // keypress so the user can read the output before the TUI repaints over it.
 type scriptSession struct {
+	ctx           context.Context
 	p             profile.Profile
 	creds         sshx.Credentials
 	name, content string
@@ -499,6 +589,9 @@ type scriptSession struct {
 }
 
 func (s *scriptSession) Run() error {
+	if s.ctx == nil {
+		s.ctx = context.Background()
+	}
 	defer func() { s.creds = sshx.Credentials{} }()
 	width := 60
 	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
@@ -509,7 +602,7 @@ func (s *scriptSession) Run() error {
 	fmt.Println(theme.Divider(width))
 
 	start := time.Now()
-	fp, line, code, err := sshx.RunScript(s.p, s.creds, s.content, os.Stdout, os.Stderr, preflightTimeout*2)
+	fp, line, code, err := sshx.RunScriptContext(s.ctx, s.p, s.creds, s.content, os.Stdout, os.Stderr, preflightTimeout*2)
 	s.fp, s.keyLine = fp, line
 	elapsed := time.Since(start).Round(10 * time.Millisecond)
 
@@ -528,13 +621,20 @@ func (s *scriptSession) Run() error {
 	}
 
 	fmt.Println(theme.Hint.Render("press any key to return to clavis"))
-	waitAnyKey(os.Stdin)
+	waitAnyKeyContext(s.ctx, os.Stdin)
 	return nil // failures are reported via summary; not an exec error
 }
 
 // waitAnyKey blocks until one byte arrives from the terminal. Raw mode so a
 // bare keypress (no enter) suffices; skipped silently when stdin isn't a tty.
 func waitAnyKey(in *os.File) {
+	waitAnyKeyContext(context.Background(), in)
+}
+
+func waitAnyKeyContext(ctx context.Context, in *os.File) {
+	if ctx.Err() != nil {
+		return
+	}
 	fd := int(in.Fd())
 	if !term.IsTerminal(fd) {
 		return
@@ -544,23 +644,18 @@ func waitAnyKey(in *os.File) {
 		return
 	}
 	defer term.Restore(fd, old)
+	reader, err := cancelreader.NewReader(in)
+	if err != nil {
+		return
+	}
+	defer reader.Close()
+	stop := context.AfterFunc(ctx, func() { reader.Cancel() })
+	defer stop()
 	buf := make([]byte, 1)
-	in.Read(buf)
+	reader.Read(buf)
 }
 
 // The session writes to the real TTY; bubbletea's redirects are moot.
 func (s *scriptSession) SetStdin(io.Reader)  {}
 func (s *scriptSession) SetStdout(io.Writer) {}
 func (s *scriptSession) SetStderr(io.Writer) {}
-
-// saveScripts persists scripts.json and, when autosync is on, syncs it along.
-func (m *Model) saveScripts(what string) tea.Cmd {
-	if err := m.scripts.Save(); err != nil {
-		m.setStatus(statusErr, "save failed: "+err.Error())
-		return nil
-	}
-	if m.cfg.Sync.AutoSync && m.cfg.Sync.Remote != "" {
-		return m.syncCmd("clavis: " + what)
-	}
-	return nil
-}

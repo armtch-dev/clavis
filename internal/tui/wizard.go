@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/armtch-dev/clavis/internal/fstxn"
 	"github.com/armtch-dev/clavis/internal/profile"
 	"github.com/armtch-dev/clavis/internal/sshx"
 	"github.com/armtch-dev/clavis/internal/theme"
@@ -67,18 +68,26 @@ var stepTitles = map[wstep]string{
 }
 
 type wizardModel struct {
-	app     *Model
-	editing bool
-	draft   profile.Profile
+	app               *Model
+	editing           bool
+	storedKey         bool // snapshot for pure rendering; checked again by storage on save
+	secretRevisions   map[string]fstxn.Revision
+	secretSnapshotErr error
+	metadataCheck     func(*fstxn.Lock) error // opening snapshot, independent of later model reloads
+	draft             profile.Profile
 	// ident switches the wizard into identity-editor mode: host/port/proxy/
 	// category/tags/test steps drop away and saving writes an Identity.
-	ident   *profile.Identity
-	pickIdx int // stepIdentity cursor: 0 = per-host credentials, 1.. = identities
+	ident       *profile.Identity
+	pickIdx     int    // stepIdentity cursor: 0 = per-host credentials, 1.. = identities
+	pickID      string // highlighted identity; the row is derived from this ID
+	pickMissing bool   // disappearance requires an explicit navigation choice
 
-	step  wstep
-	input textinput.Model
-	area  textarea.Model
-	errs  string
+	step      wstep
+	fieldPick bool
+	fieldIdx  int
+	input     textinput.Model
+	area      textarea.Model
+	errs      string
 
 	usePassword, useKey bool
 	keySource           string // "paste" | "file"
@@ -87,20 +96,29 @@ type wizardModel struct {
 	passphrase          string
 	keyNeedsPassphrase  bool
 
-	awaitingTest bool
-	testResult   *sshx.TestResult
-	tested       bool
+	awaitingTest  bool
+	testJob       *networkJob
+	testResult    *sshx.TestResult
+	testEndpoint  *profile.Profile
+	trustEndpoint *profile.Profile
+	tested        bool
 }
 
 func newWizard(app *Model, edit *profile.Profile) *wizardModel {
 	w := &wizardModel{app: app, keySource: "paste"}
 	if edit != nil {
 		w.editing = true
+		snapshot := *app.store
+		w.metadataCheck = snapshot.CheckCurrentLocked
 		w.draft = *edit
 		w.usePassword = edit.HasAuth(profile.AuthPassword)
 		w.useKey = edit.HasAuth(profile.AuthKey)
 	} else {
 		w.draft = profile.Profile{ID: profile.NewID(), Port: 22}
+	}
+	w.storedKey = w.editing && app.hasSecret(w.keySecret(), false)
+	if w.editing {
+		w.secretRevisions, w.secretSnapshotErr = app.secretSnapshot(w.passSecret(), w.keySecret(), w.phraseSecret())
 	}
 	w.setStep(stepName)
 	return w
@@ -112,12 +130,18 @@ func newIdentityWizard(app *Model, edit *profile.Identity) *wizardModel {
 	w := &wizardModel{app: app, keySource: "paste"}
 	if edit != nil {
 		w.editing = true
+		snapshot := *app.idents
+		w.metadataCheck = snapshot.CheckCurrentLocked
 		cp := *edit
 		w.ident = &cp
 		w.usePassword = cp.HasAuth(profile.AuthPassword)
 		w.useKey = cp.HasAuth(profile.AuthKey)
 	} else {
-		w.ident = &profile.Identity{}
+		w.ident = &profile.Identity{ID: "i" + profile.NewID()[1:]}
+	}
+	w.storedKey = w.editing && app.hasSecret(w.keySecret(), false)
+	if w.editing {
+		w.secretRevisions, w.secretSnapshotErr = app.secretSnapshot(w.passSecret(), w.keySecret(), w.phraseSecret())
 	}
 	w.setStep(stepName)
 	return w
@@ -147,6 +171,13 @@ func (w *wizardModel) phraseSecret() string {
 }
 
 func (w *wizardModel) setStep(s wstep) {
+	if s != stepTest && w.testJob != nil {
+		w.testJob.cancel()
+		w.testJob = nil
+		w.awaitingTest = false
+		w.testResult = nil
+		w.testEndpoint = nil
+	}
 	w.step = s
 	w.errs = ""
 
@@ -167,6 +198,7 @@ func (w *wizardModel) setStep(s wstep) {
 		}
 		ta.Focus()
 		w.area = ta
+		w.app.resizeEditors()
 		return
 	}
 
@@ -189,13 +221,8 @@ func (w *wizardModel) setStep(s wstep) {
 	case stepPort:
 		ti.SetValue(strconv.Itoa(w.draft.Port))
 	case stepIdentity:
-		w.pickIdx = 0
-		for i, id := range w.app.idents.Identities {
-			if id.ID == w.draft.IdentityID {
-				w.pickIdx = i + 1
-				break
-			}
-		}
+		w.pickID, w.pickMissing = w.draft.IdentityID, false
+		w.reconcileIdentityPick()
 	case stepUser:
 		if w.ident != nil {
 			ti.SetValue(w.ident.User)
@@ -204,17 +231,19 @@ func (w *wizardModel) setStep(s wstep) {
 		}
 	case stepPassword:
 		ti.EchoMode = textinput.EchoPassword
-		if w.editing && w.app.vault.Has(w.passSecret()) {
+		ti.SetValue(w.password)
+		if w.editing && w.app.hasSecret(w.passSecret(), false) {
 			ti.Placeholder = "leave empty to keep the stored password"
 		}
 	case stepKeyPath:
-		if w.editing && w.app.vault.Has(w.keySecret()) {
+		if w.editing && w.app.hasSecret(w.keySecret(), false) {
 			ti.Placeholder = "leave empty to keep the stored key"
 		} else {
 			ti.Placeholder = "~/.ssh/id_ed25519"
 		}
 	case stepPassphrase:
 		ti.EchoMode = textinput.EchoPassword
+		ti.SetValue(w.passphrase)
 	case stepProxyJump:
 		ti.SetValue(w.draft.ProxyJump)
 		ti.Placeholder = "user@bastion.example.com:22 — enter to skip"
@@ -225,12 +254,13 @@ func (w *wizardModel) setStep(s wstep) {
 		ti.SetValue(strings.Join(w.draft.Tags, " "))
 	}
 	w.input = ti
+	w.input.Width = max(1, panelWidth(w.app.width, 72)-8)
 }
 
 // hasStoredKey reports whether the target being edited already has a key in
 // the vault, i.e. "keep the stored key" is a valid answer.
 func (w *wizardModel) hasStoredKey() bool {
-	return w.editing && w.app.vault.Has(w.keySecret())
+	return w.storedKey
 }
 
 // skip reports whether a step doesn't apply given the answers so far.
@@ -245,7 +275,8 @@ func (w *wizardModel) skip(s wstep) bool {
 		switch s {
 		case stepIdentity:
 			// Nothing to pick from until an identity exists (press y to make one).
-			return len(w.app.idents.Identities) == 0
+			// A deleted binding must still offer an explicit per-host choice.
+			return len(w.app.idents.Identities) == 0 && w.draft.IdentityID == ""
 		case stepUser, stepUsePassword, stepPassword, stepUseKey,
 			stepKeySource, stepKeyPaste, stepKeyPath, stepPassphrase:
 			if w.draft.IdentityID != "" {
@@ -308,8 +339,17 @@ func (m *Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if key.Type == tea.KeyCtrlS && w.step == stepTest {
+		if w.ident != nil {
+			return w.saveIdentity(m)
+		}
+		return w.save(m)
+	}
 
 	if key.Type == tea.KeyEsc {
+		if w.testJob != nil {
+			w.testJob.cancel()
+		}
 		if w.step == stepName || w.awaitingTest {
 			w.wipeSecrets()
 			m.wizard = nil
@@ -343,20 +383,16 @@ func (m *Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch w.step {
 	case stepIdentity:
 		n := len(m.idents.Identities)
+		w.reconcileIdentityPick()
 		switch key.String() {
 		case "up", "k":
-			if w.pickIdx > 0 {
-				w.pickIdx--
-			}
+			w.chooseIdentityRow(max(0, w.pickIdx-1))
 		case "down", "j":
-			if w.pickIdx < n {
-				w.pickIdx++
-			}
+			w.chooseIdentityRow(min(n, w.pickIdx+1))
 		case "enter":
-			if w.pickIdx == 0 {
-				w.draft.IdentityID = ""
-			} else {
-				w.draft.IdentityID = m.idents.Identities[w.pickIdx-1].ID
+			if err := w.commitStep(); err != nil {
+				w.errs = err.Error()
+				return m, nil
 			}
 			w.setStep(w.next(w.step))
 		}
@@ -394,6 +430,7 @@ func (m *Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Keep the stored key: skips the paste/path steps entirely.
 			if w.hasStoredKey() {
 				w.keySource = "keep"
+				w.discardKeyDraft()
 				w.setStep(w.next(w.step))
 			}
 		}
@@ -465,13 +502,25 @@ func (w *wizardModel) setBool(v bool) {
 func (w *wizardModel) commitStep() error {
 	val := strings.TrimSpace(w.input.Value())
 	switch w.step {
+	case stepIdentity:
+		w.reconcileIdentityPick()
+		if w.pickMissing || w.pickIdx < 0 || w.pickIdx > len(w.app.idents.Identities) || w.pickID != "" && w.app.idents.ByID(w.pickID) == nil {
+			return fmt.Errorf("selected identity no longer exists — use j/k to choose credentials again")
+		}
+		w.draft.IdentityID = w.pickID
 	case stepName:
-		if val == "" {
-			return fmt.Errorf("name is required")
+		if err := profile.ValidateName(val); err != nil {
+			return err
 		}
 		if w.ident != nil {
+			if other := w.app.idents.ByName(val); other != nil && other.ID != w.ident.ID {
+				return fmt.Errorf("an identity named %q already exists", val)
+			}
 			w.ident.Name = val
 		} else {
+			if other := w.app.store.ByName(val); other != nil && other.ID != w.draft.ID {
+				return fmt.Errorf("a profile named %q already exists", val)
+			}
 			w.draft.Name = val
 		}
 	case stepHost:
@@ -490,8 +539,8 @@ func (w *wizardModel) commitStep() error {
 		}
 		w.draft.Port = p
 	case stepUser:
-		if val == "" {
-			return fmt.Errorf("user is required")
+		if err := profile.ValidateUser(val); err != nil {
+			return err
 		}
 		if w.ident != nil {
 			w.ident.User = val
@@ -499,14 +548,15 @@ func (w *wizardModel) commitStep() error {
 			w.draft.User = val
 		}
 	case stepPassword:
-		if val == "" && !(w.editing && w.app.vault.Has(w.passSecret())) {
+		if val == "" && !(w.editing && w.app.hasSecret(w.passSecret(), false)) {
 			return fmt.Errorf("password is required (or go back and answer n)")
 		}
 		w.password = val
 	case stepKeyPaste:
 		raw := []byte(w.area.Value())
 		if len(strings.TrimSpace(string(raw))) == 0 {
-			if w.editing && w.app.vault.Has(w.keySecret()) {
+			if w.editing && w.app.hasSecret(w.keySecret(), false) {
+				w.discardKeyDraft()
 				return nil // keep stored key
 			}
 			return fmt.Errorf("paste a private key, or press esc and choose 'from file'")
@@ -555,7 +605,8 @@ func (w *wizardModel) acceptKey(raw []byte) error {
 
 func (w *wizardModel) loadKeyFile(path string) error {
 	if path == "" {
-		if w.editing && w.app.vault.Has(w.keySecret()) {
+		if w.editing && w.app.hasSecret(w.keySecret(), false) {
+			w.discardKeyDraft()
 			return nil
 		}
 		return fmt.Errorf("key path is required (or go back and answer n)")
@@ -571,16 +622,32 @@ func (w *wizardModel) loadKeyFile(path string) error {
 	return w.acceptKey(raw)
 }
 
-func (w *wizardModel) wipeSecrets() {
-	w.password, w.passphrase = "", ""
-	for i := range w.keyPEM {
-		w.keyPEM[i] = 0
-	}
+func (w *wizardModel) discardKeyDraft() {
+	clear(w.keyPEM)
 	w.keyPEM = nil
+	w.passphrase = ""
+	w.keyNeedsPassphrase = false
+}
+
+func (w *wizardModel) wipeSecrets() {
+	if w.testJob != nil {
+		w.testJob.cancel()
+		w.testJob = nil
+	}
+	w.password = ""
+	w.discardKeyDraft()
+	w.input.SetValue("")
+	w.area = textarea.Model{}
 }
 
 // startTest saves nothing yet — it builds creds from the draft and probes.
 func (w *wizardModel) startTest(m *Model) tea.Cmd {
+	if w.testJob != nil {
+		w.testJob.cancel()
+		w.testJob = nil
+	}
+	w.testResult, w.testEndpoint = nil, nil
+	w.awaitingTest = false
 	w.draft.Auth = nil
 	if w.draft.IdentityID == "" {
 		if w.usePassword {
@@ -590,42 +657,51 @@ func (w *wizardModel) startTest(m *Model) tea.Cmd {
 			w.draft.Auth = append(w.draft.Auth, profile.AuthKey)
 		}
 	}
-	var creds sshx.Credentials
-	if w.draft.IdentityID != "" {
-		// Identity-backed: the identity's vault secrets are the credentials.
-		if c, err := m.credsFor(&w.draft); err == nil {
-			creds = c
-		}
-	} else {
-		creds = sshx.Credentials{Password: w.password, PrivateKey: w.keyPEM, Passphrase: w.passphrase}
-		if w.editing && m.vault.Unlocked() {
-			if creds.Password == "" && w.usePassword {
-				if b, err := m.vault.Get(w.draft.PassSecret()); err == nil {
-					creds.Password = string(b)
-				}
-			}
-			if len(creds.PrivateKey) == 0 && w.useKey {
-				if b, err := m.vault.Get(w.draft.KeySecret()); err == nil {
-					creds.PrivateKey = b
-				}
-				if b, err := m.vault.Get(w.draft.PassphraseSecret()); err == nil {
-					creds.Passphrase = string(b)
-				}
-			}
-		}
-	}
-	if creds.Password == "" && len(creds.PrivateKey) == 0 {
-		w.testResult = &sshx.TestResult{
-			Stage:  sshx.StageAuth,
-			Reason: "no credentials available to test (vault locked?) — you can still save",
-		}
+	creds, err := w.testCredentials(m)
+	if err != nil {
+		w.errs = err.Error()
+		w.testResult = &sshx.TestResult{Stage: sshx.StageAuth, Err: err, Reason: err.Error()}
 		return nil
 	}
 	w.awaitingTest = true
 	p := m.effective(w.draft)
-	return func() tea.Msg {
-		return testDoneMsg{p.ID, sshx.Test(p, creds, testTimeout)}
+	return m.runTest(p, creds, w)
+}
+
+func (w *wizardModel) testCredentials(m *Model) (sshx.Credentials, error) {
+	if w.draft.IdentityID != "" {
+		return m.credsFor(&w.draft)
 	}
+	c := sshx.Credentials{}
+	if w.usePassword {
+		c.Password = w.password
+		if c.Password == "" && w.editing {
+			b, err := m.getSecret(w.passSecret(), false)
+			if err != nil {
+				return c, err
+			}
+			c.Password = string(b)
+		}
+	}
+	if w.useKey {
+		c.PrivateKey, c.Passphrase = w.keyPEM, w.passphrase
+		if len(c.PrivateKey) == 0 && w.editing {
+			var err error
+			c.PrivateKey, err = m.getSecret(w.keySecret(), false)
+			if err != nil {
+				return c, err
+			}
+			b, err := m.optionalSecret(w.phraseSecret())
+			if err != nil {
+				return c, err
+			}
+			c.Passphrase = string(b)
+		}
+	}
+	if c.Password == "" && len(c.PrivateKey) == 0 {
+		return c, fmt.Errorf("no credentials available to test — enter credentials or unlock the vault")
+	}
+	return c, nil
 }
 
 func (w *wizardModel) updateTest(m *Model, key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -637,8 +713,14 @@ func (w *wizardModel) updateTest(m *Model, key tea.KeyMsg) (tea.Model, tea.Cmd) 
 		w.tested = false
 		return m, w.startTest(m)
 	case "enter", "s", "S":
+		if w.ident != nil {
+			return w.saveIdentity(m)
+		}
 		return w.save(m)
 	case "b", "B":
+		if w.testJob != nil {
+			w.testJob.cancel()
+		}
 		w.setStep(stepTags)
 		return m, nil
 	}
@@ -646,6 +728,15 @@ func (w *wizardModel) updateTest(m *Model, key tea.KeyMsg) (tea.Model, tea.Cmd) 
 }
 
 func (w *wizardModel) save(m *Model) (tea.Model, tea.Cmd) {
+	release, err := m.mutationLock()
+	if err != nil {
+		w.errs = err.Error()
+		return m, nil
+	}
+	defer release()
+	if !w.canSave(m) {
+		return m, nil
+	}
 	// Rebuild Auth from the current answers here (not only in startTest):
 	// the ctrl+s quick-save path never runs the test step. Identity-backed
 	// profiles carry no auth of their own.
@@ -658,62 +749,60 @@ func (w *wizardModel) save(m *Model) (tea.Model, tea.Cmd) {
 			w.draft.Auth = append(w.draft.Auth, profile.AuthKey)
 		}
 	}
-	var saved *profile.Profile
-	var err error
-	if w.editing {
-		err = m.store.Update(w.draft)
-		saved = m.store.ByID(w.draft.ID)
-	} else {
-		saved, err = m.store.Add(w.draft)
-	}
+	err = m.mutate(func(s *diskState, l *fstxn.Lock) ([]fstxn.Change, error) {
+		p := w.draft
+		if w.trustEndpoint != nil && !sameTestTarget(m.effective(p), *w.trustEndpoint) {
+			return nil, fmt.Errorf("endpoint changed after trust approval — test and review again")
+		}
+		if p.HostKeyFP == "" && p.HostKey == "" && w.testResult != nil && w.testResult.OK && w.testEndpoint != nil && sameTestTarget(m.effective(p), *w.testEndpoint) {
+			if err := observedKey(w.testResult.HostKeyFP, w.testResult.HostKeyLine); err != nil {
+				return nil, err
+			}
+			p.HostKeyFP, p.HostKey = w.testResult.HostKeyFP, w.testResult.HostKeyLine
+		}
+		if p.IdentityID != "" && s.idents.ByID(p.IdentityID) == nil {
+			return nil, fmt.Errorf("identity no longer exists — choose credentials again")
+		}
+		if w.editing {
+			err = s.store.Update(p)
+		} else {
+			_, err = s.store.Add(p)
+		}
+		if err != nil {
+			w.setStep(stepName)
+			return nil, err
+		}
+		changes, err := w.credentialChanges(s, l, p.PassSecret(), p.KeySecret(), p.PassphraseSecret(), p.IdentityID != "")
+		if err != nil {
+			return nil, err
+		}
+		c, err := s.store.Change()
+		return append(changes, c), err
+	})
 	if err != nil {
 		w.errs = err.Error()
-		w.setStep(stepName)
+		m.setStatus(statusErr, "save failed: "+err.Error())
 		return m, nil
-	}
-	if w.draft.IdentityID != "" {
-		// Switched to an identity: per-host secrets would be orphans.
-		m.vault.Delete(saved.PassSecret())
-		m.vault.Delete(saved.KeySecret())
-		m.vault.Delete(saved.PassphraseSecret())
-	} else {
-		if w.usePassword && w.password != "" {
-			if err := m.vault.Put(saved.PassSecret(), []byte(w.password)); err != nil {
-				m.setStatus(statusErr, "vault write failed: "+err.Error())
-			}
-		}
-		if !w.usePassword {
-			m.vault.Delete(saved.PassSecret())
-		}
-		if w.useKey && len(w.keyPEM) > 0 {
-			m.vault.Put(saved.KeySecret(), w.keyPEM)
-			if w.passphrase != "" {
-				m.vault.Put(saved.PassphraseSecret(), []byte(w.passphrase))
-			} else if !w.keyNeedsPassphrase {
-				// The new key is unprotected — a passphrase left over from a
-				// previously stored key would be stale ciphertext.
-				m.vault.Delete(saved.PassphraseSecret())
-			}
-		}
-		if !w.useKey {
-			m.vault.Delete(saved.KeySecret())
-			m.vault.Delete(saved.PassphraseSecret())
-		}
-	}
-	if w.testResult != nil && w.testResult.OK && saved.HostKeyFP == "" {
-		saved.HostKeyFP = w.testResult.HostKeyFP
-		saved.HostKey = w.testResult.HostKeyLine
 	}
 	w.wipeSecrets()
 	m.wizard = nil
 	m.screen = scrList
-	m.setStatus(statusOK, "saved "+saved.Name)
-	return m, m.saveAll("save profile " + saved.Name)
+	m.setStatus(statusOK, "saved "+w.draft.Name)
+	return m, m.afterMutation("save profile " + w.draft.Name)
 }
 
 // saveIdentity persists the identity draft and its secrets, then returns to
 // the identities screen. Mirrors save(), minus everything host-specific.
 func (w *wizardModel) saveIdentity(m *Model) (tea.Model, tea.Cmd) {
+	release, err := m.mutationLock()
+	if err != nil {
+		w.errs = err.Error()
+		return m, nil
+	}
+	defer release()
+	if !w.canSave(m) {
+		return m, nil
+	}
 	w.ident.Auth = nil
 	if w.usePassword {
 		w.ident.Auth = append(w.ident.Auth, profile.AuthPassword)
@@ -721,44 +810,34 @@ func (w *wizardModel) saveIdentity(m *Model) (tea.Model, tea.Cmd) {
 	if w.useKey {
 		w.ident.Auth = append(w.ident.Auth, profile.AuthKey)
 	}
-	var saved *profile.Identity
-	var err error
-	if w.editing {
-		err = m.idents.Update(*w.ident)
-		saved = m.idents.ByID(w.ident.ID)
-	} else {
-		saved, err = m.idents.Add(*w.ident)
-	}
+	err = m.mutate(func(s *diskState, l *fstxn.Lock) ([]fstxn.Change, error) {
+		id := *w.ident
+		if w.editing {
+			err = s.idents.Update(id)
+		} else {
+			_, err = s.idents.Add(id)
+		}
+		if err != nil {
+			w.setStep(stepName)
+			return nil, err
+		}
+		changes, err := w.credentialChanges(s, l, id.PassSecret(), id.KeySecret(), id.PassphraseSecret(), false)
+		if err != nil {
+			return nil, err
+		}
+		c, err := s.idents.Change()
+		return append(changes, c), err
+	})
 	if err != nil {
 		w.errs = err.Error()
-		w.setStep(stepName)
+		m.setStatus(statusErr, "save failed: "+err.Error())
 		return m, nil
-	}
-	if w.usePassword && w.password != "" {
-		if err := m.vault.Put(saved.PassSecret(), []byte(w.password)); err != nil {
-			m.setStatus(statusErr, "vault write failed: "+err.Error())
-		}
-	}
-	if !w.usePassword {
-		m.vault.Delete(saved.PassSecret())
-	}
-	if w.useKey && len(w.keyPEM) > 0 {
-		m.vault.Put(saved.KeySecret(), w.keyPEM)
-		if w.passphrase != "" {
-			m.vault.Put(saved.PassphraseSecret(), []byte(w.passphrase))
-		} else if !w.keyNeedsPassphrase {
-			m.vault.Delete(saved.PassphraseSecret())
-		}
-	}
-	if !w.useKey {
-		m.vault.Delete(saved.KeySecret())
-		m.vault.Delete(saved.PassphraseSecret())
 	}
 	w.wipeSecrets()
 	m.wizard = nil
 	m.screen = scrIdentities
-	m.setStatus(statusOK, "saved identity "+saved.Name)
-	return m, m.saveIdents("save identity " + saved.Name)
+	m.setStatus(statusOK, "saved identity "+w.ident.Name)
+	return m, m.afterMutation("save identity " + w.ident.Name)
 }
 
 // --- view ---
@@ -862,13 +941,45 @@ func (w *wizardModel) progress(width int) string {
 	return strings.Join(parts, " ") + "  " + counter
 }
 
-// viewIdentityPick renders the identity chooser: per-host credentials, or
-// one of the stored identities. Same selection language as the list (▎).
+// Reconcile without converting a vanished identity into a different credential
+// choice. Only explicit navigation clears the missing-selection state.
+func (w *wizardModel) reconcileIdentityPick() {
+	w.pickIdx = 0
+	if w.pickMissing {
+		return
+	}
+	if w.pickID == "" {
+		return
+	}
+	for i, id := range w.app.idents.Identities {
+		if id.ID == w.pickID {
+			w.pickIdx = i + 1
+			return
+		}
+	}
+	w.pickMissing = true
+	w.errs = "selected identity no longer exists — use j/k to choose credentials again"
+}
+
+func (w *wizardModel) chooseIdentityRow(row int) {
+	w.pickIdx = clamp(row, 0, len(w.app.idents.Identities))
+	w.pickID = ""
+	if w.pickIdx > 0 {
+		w.pickID = w.app.idents.Identities[w.pickIdx-1].ID
+	}
+	w.pickMissing, w.errs = false, ""
+}
+
 func (w *wizardModel) viewIdentityPick(dw int) string {
 	var b strings.Builder
+	rows := clamp(w.app.height-14, 1, 12)
+	start := max(0, w.pickIdx-rows+1)
 	row := func(i int, label, meta string) {
+		if i < start || i >= start+rows {
+			return
+		}
 		lead := "  "
-		if i == w.pickIdx {
+		if !w.pickMissing && i == w.pickIdx {
 			lead = theme.Accent.Render("▎") + " "
 		}
 		line := lead + theme.Value.Render(label)
@@ -887,6 +998,9 @@ func (w *wizardModel) viewIdentityPick(dw int) string {
 			chips = append(chips, theme.IconPwd)
 		}
 		row(i+1, id.Name, id.User+"  "+strings.Join(chips, " "))
+	}
+	if len(w.app.idents.Identities)+1 > rows {
+		b.WriteString(theme.Hint.Render(fmt.Sprintf("%d–%d of %d · j/k choose", start+1, min(start+rows, len(w.app.idents.Identities)+1), len(w.app.idents.Identities)+1)))
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

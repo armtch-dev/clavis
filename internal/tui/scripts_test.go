@@ -219,6 +219,9 @@ func TestManagerDeleteConfirmsAndRunPickerIsRunOnly(t *testing.T) {
 	if _, err := m.scripts.Add(script.Script{Name: "victim", Content: "true"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := m.scripts.Save(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Run picker: d and e are inert.
 	m.dispatch(keyRunes("r"))

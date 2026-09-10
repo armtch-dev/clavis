@@ -29,6 +29,8 @@ func installFido2Fakes(t *testing.T) string {
 		t.Skip("fake fido2 tools are shell scripts")
 	}
 	dir := t.TempDir()
+	// Completion must never reach the developer's real Keychain.
+	writeFakeTool(t, dir, "security", "#!/bin/sh\nexit 1\n")
 	writeFakeTool(t, dir, "fido2-token", `#!/bin/sh
 echo "ioreg://4295231483: vendor=0x1050, product=0x0407 (Yubico YubiKey OTP+FIDO+CCID)"
 `)

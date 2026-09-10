@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/armtch-dev/clavis/internal/fstxn"
 	"github.com/armtch-dev/clavis/internal/profile"
 	"github.com/armtch-dev/clavis/internal/sshconfig"
 	"github.com/armtch-dev/clavis/internal/theme"
@@ -50,6 +51,18 @@ func (m *Model) visible() []profile.Profile {
 		base = out
 	}
 	return m.sortProfiles(base)
+}
+
+type groupCount struct{ total, up, down int }
+type visibleCache struct {
+	valid    bool
+	store    *profile.Store
+	length   int
+	filter   string
+	mode     sortMode
+	profiles []profile.Profile
+	entries  []listEntry
+	groups   map[string]groupCount
 }
 
 // sortProfiles reorders a copy of in: always grouped by category first
@@ -130,18 +143,26 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEsc:
 			m.catTarget, m.catInput = "", ""
 		case tea.KeyEnter:
-			if p := m.store.ByID(m.catTarget); p != nil {
-				p.Category = strings.TrimPrefix(strings.TrimSpace(m.catInput), "#")
-				name := p.Name
-				m.catTarget, m.catInput = "", ""
-				if p.Category == "" {
-					m.setStatus(statusOK, name+" is now uncategorized")
-				} else {
-					m.setStatus(statusOK, name+" → "+p.Category)
+			target, category := m.catTarget, strings.TrimPrefix(strings.TrimSpace(m.catInput), "#")
+			err := m.mutate(func(s *diskState, l *fstxn.Lock) ([]fstxn.Change, error) {
+				p := s.store.ByID(target)
+				if p == nil {
+					return nil, fmt.Errorf("profile no longer exists")
 				}
-				return m, m.saveAll("set category on " + name)
+				p.Category = category
+				if err := s.store.Update(*p); err != nil {
+					return nil, err
+				}
+				c, err := s.store.Change()
+				return []fstxn.Change{c}, err
+			})
+			if err != nil {
+				m.setStatus(statusErr, "category save failed: "+err.Error())
+				return m, nil
 			}
 			m.catTarget, m.catInput = "", ""
+			m.setStatus(statusOK, "category saved")
+			return m, m.afterMutation("set category")
 		case tea.KeyBackspace:
 			m.catInput = trimLastRune(m.catInput)
 		case tea.KeyRunes:
@@ -155,6 +176,7 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "q":
 		m.quiting = true
+		m.cancelWork()
 		m.monitor.Stop()
 		return m, tea.Quit
 	case "up", "k":
@@ -184,6 +206,11 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "g":
 		m.settings = newSettings(m)
 		m.screen = scrSettings
+		return m, m.localSnapshotCmd(m.settings)
+	case "v":
+		if p := m.selected(vis); p != nil {
+			m.detailID, m.panelScroll = p.ID, 0
+		}
 	case "u":
 		if !m.vault.Unlocked() {
 			m.unlock = newUnlock(m.vault, m.cfgDir)
@@ -192,6 +219,7 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "/":
 		m.filtering = true
 		m.filter = ""
+		m.clampCursor()
 	case "c":
 		if p := m.selected(vis); p != nil {
 			m.catTarget, m.catInput = p.ID, p.Category
@@ -229,7 +257,10 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.syncCmd("manual sync")
 	case "i":
 		m.importSSHConfig()
-		return m, m.saveAll("import from ssh_config")
+		if m.statusType == statusOK && m.cfg.Sync.AutoSync && m.cfg.Sync.Remote != "" {
+			return m, m.syncCmd("import from ssh_config")
+		}
+		return m, nil
 	case "r":
 		if p := m.selected(vis); p != nil && m.connecting == "" {
 			m.scriptsUI = newScripts(m, p)
@@ -267,6 +298,25 @@ func (m *Model) clampCursor() {
 	m.reconcileSelection(m.visible())
 }
 
+func (m *Model) rememberSelection(vis []profile.Profile) {
+	m.selectedID = ""
+	if m.cursor >= 0 && m.cursor < len(vis) {
+		m.selectedID = vis[m.cursor].ID
+	}
+}
+
+func (m *Model) reconcileSelection(vis []profile.Profile) {
+	for i, p := range vis {
+		if p.ID == m.selectedID {
+			m.cursor = i
+			return
+		}
+	}
+	// Removed/filtered selection falls to the same row, or the preceding last row.
+	m.cursor = clamp(m.cursor, 0, max(0, len(vis)-1))
+	m.rememberSelection(vis)
+}
+
 // importSSHConfig pulls non-wildcard hosts from ~/.ssh/config, storing
 // identity files into the vault (works even while locked).
 func (m *Model) importSSHConfig() {
@@ -280,9 +330,39 @@ func (m *Model) importSSHConfig() {
 		m.setStatus(statusErr, "import: "+err.Error())
 		return
 	}
+	if err := m.importSSHEntries(entries); err != nil {
+		m.setStatus(statusErr, "import: "+err.Error())
+	}
+}
+
+// Retain one directory owner and one Apply for imported metadata and ciphertext.
+// Publish a fresh Locked load only after success, preserving optimistic revisions.
+func (m *Model) importSSHEntries(entries []sshconfig.Entry) error {
+	if m.selectedID == "" {
+		m.rememberSelection(m.visible())
+	}
+	if m.syncing || m.persistenceErr != nil {
+		return fmt.Errorf("import paused during sync/storage recovery")
+	}
+	release, err := m.mutationLock()
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := m.store.CheckCurrentLocked(m.uiLock); err != nil {
+		return err
+	}
+	if err := m.vault.CheckCurrentLocked(m.uiLock); err != nil {
+		return err
+	}
+	store, err := profile.LoadStoreLocked(m.uiLock)
+	if err != nil {
+		return err
+	}
+	var changes []fstxn.Change
 	added, skipped, keyless := 0, 0, 0
 	for _, e := range entries {
-		if m.store.ByName(e.Alias) != nil {
+		if store.ByName(e.Alias) != nil {
 			skipped++
 			continue
 		}
@@ -295,23 +375,45 @@ func (m *Model) importSSHConfig() {
 			ProxyJump: e.ProxyJump, Auth: []profile.AuthKind{profile.AuthKey},
 			Tags: []string{"imported"},
 		}
-		np, err := m.store.Add(p)
+		np, err := store.Add(p)
 		if err != nil {
 			skipped++
 			continue
 		}
 		if raw, rerr := os.ReadFile(e.IdentityFile); e.IdentityFile != "" && rerr == nil {
-			m.vault.Put(np.KeySecret(), raw)
+			change, err := m.vault.SecretChangeLocked(m.uiLock, np.KeySecret(), raw, false)
+			if err != nil {
+				return err
+			}
+			changes = append(changes, change)
 		} else {
 			keyless++ // no IdentityFile, or unreadable — profile works once a key is added via edit
 		}
 		added++
+	}
+	if added > 0 {
+		metadata, err := store.Change()
+		if err != nil {
+			return err
+		}
+		if err := m.uiLock.Apply(append(changes, metadata)); err != nil {
+			return m.noteWrite(err)
+		}
+		store, err = profile.LoadStoreLocked(m.uiLock)
+		if err != nil {
+			return m.noteWrite(err)
+		}
+		m.store = store
+		m.syncState.Dirty = true
+		m.syncTargets()
+		m.clampCursor()
 	}
 	msg := fmt.Sprintf("imported %d host(s), skipped %d (duplicate/invalid)", added, skipped)
 	if keyless > 0 {
 		msg += fmt.Sprintf(", %d without keys (add via e)", keyless)
 	}
 	m.setStatus(statusOK, msg)
+	return nil
 }
 
 // --- confirm delete ---
@@ -327,23 +429,56 @@ func (m *Model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	switch key.String() {
 	case "y", "Y":
-		secrets, err := m.store.Remove(m.confirm.profileID)
-		if err == nil {
-			for _, s := range secrets {
-				m.vault.Delete(s)
-			}
-			m.setStatus(statusOK, "deleted "+m.confirm.name)
+		release, err := m.mutationLock()
+		if err != nil {
+			m.setStatus(statusErr, err.Error())
+			return m, nil
 		}
+		defer release()
+		if m.syncing || m.persistenceErr != nil {
+			m.setStatus(statusWarn, "deletion paused — retry after sync/storage recovery")
+			return m, nil
+		}
+		if err := m.store.CheckCurrentLocked(m.uiLock); err != nil {
+			m.setStatus(statusErr, err.Error())
+			return m, nil
+		}
+		if err := m.vault.CheckCurrentLocked(m.uiLock); err != nil {
+			m.setStatus(statusErr, err.Error())
+			return m, nil
+		}
+		if m.confirm.profileID == "" || m.store.ByID(m.confirm.profileID) == nil {
+			m.setStatus(statusWarn, "profile target changed — select it again")
+			return m, nil
+		}
+		target, name := m.confirm.profileID, m.confirm.name
+		err = m.mutate(func(s *diskState, l *fstxn.Lock) ([]fstxn.Change, error) {
+			secrets, err := s.store.Remove(target)
+			if err != nil {
+				return nil, err
+			}
+			changes, err := secretDeletes(secrets)
+			if err != nil {
+				return nil, err
+			}
+			c, err := s.store.Change()
+			return append(changes, c), err
+		})
+		if err != nil {
+			m.setStatus(statusErr, "delete failed: "+err.Error())
+			return m, nil
+		}
+		m.setStatus(statusOK, "deleted "+name)
 		m.screen = scrList
 		m.clampCursor()
-		return m, m.saveAll("delete " + m.confirm.name)
+		return m, m.afterMutation("delete " + name)
 	default:
 		m.screen = scrList
 	}
 	return m, nil
 }
 
-func (c confirmModel) view(w, h int) string {
+func (c confirmModel) view(w, h int, scroll ...int) string {
 	pw := min(46, w-2)
 	box := theme.Panel.Width(pw).Render(
 		theme.StatusErr.Render("Delete "+c.name) + "\n\n" +
@@ -568,10 +703,10 @@ func (m *Model) fleetSummary(l listLayout) string {
 	}
 	var counts []string
 	if up > 0 {
-		counts = append(counts, fleetUpDot.Render(theme.IconUp)+theme.Dim.Render(fmt.Sprintf(" %d up", up)))
+		counts = append(counts, theme.StatusOK.Render(theme.IconUp)+theme.Dim.Render(fmt.Sprintf(" %d up", up)))
 	}
 	if down > 0 {
-		counts = append(counts, fleetDownDot.Render(theme.IconDown)+theme.Dim.Render(fmt.Sprintf(" %d down", down)))
+		counts = append(counts, theme.StatusErr.Render(theme.IconDown)+theme.Dim.Render(fmt.Sprintf(" %d down", down)))
 	}
 	var segs []string
 	if len(counts) > 0 {
@@ -592,12 +727,6 @@ func (m *Model) fleetSummary(l listLayout) string {
 
 // Status dots for the fleet strip, pulled toward the background so the strip
 // stays ambient rather than echoing the full-brightness row indicators.
-var (
-	fleetUpDot = lipgloss.NewStyle().
-			Foreground(lipgloss.Color(theme.BlendHex(theme.HexGreen, theme.HexBg, 0.35)))
-	fleetDownDot = lipgloss.NewStyle().
-			Foreground(lipgloss.Color(theme.BlendHex(theme.HexRed, theme.HexBg, 0.35)))
-)
 
 // listEntry is one display line of the row region: either a profile row
 // (idx into vis) or a category group heading.
@@ -736,7 +865,7 @@ func trimLastRune(s string) string {
 	return string(r[:len(r)-1])
 }
 
-// truncTo shortens s to at most w runes with an ellipsis.
+// truncTo budgets terminal cells, including wide/combining graphemes.
 func truncTo(s string, w int) string {
 	if w < 2 {
 		w = 2
@@ -941,11 +1070,6 @@ func spread(left, right string, width int) string {
 // Capped at ▆ so adjacent rows can never fuse into a solid slab.
 var sparkBlocks = []rune("▁▂▃▄▅▆")
 
-// sparkFail marks a failed probe sample: red pulled toward the background so
-// a bad patch reads as a scar in the trend, not a full-brightness siren.
-var sparkFail = lipgloss.NewStyle().
-	Foreground(lipgloss.Color(theme.BlendHex(theme.HexRed, theme.HexBg, 0.35)))
-
 // sparkline renders the last n latency samples as an ambient monochrome
 // trend — the shape carries the information; the latency band is already
 // encoded twice on the row (dot colour, ping cell), a third voice here was
@@ -970,7 +1094,7 @@ func sparkline(hist []float64, n int) string {
 	var b strings.Builder
 	for _, v := range hist {
 		if v < 0 {
-			b.WriteString(sparkFail.Render("╳"))
+			b.WriteString(theme.StatusErr.Render("╳"))
 			continue
 		}
 		idx := 0
@@ -1063,23 +1187,4 @@ func (m *Model) viewHelp() string {
 		theme.Chip.Render(theme.IconPwd) + theme.Dim.Render(" password") + "\n")
 	b.WriteString(theme.Hint.Render("any key to close"))
 	return theme.Panel.Width(pw).Render(b.String())
-}
-
-func (m *Model) rememberSelection(vis []profile.Profile) {
-	m.selectedID = ""
-	if m.cursor >= 0 && m.cursor < len(vis) {
-		m.selectedID = vis[m.cursor].ID
-	}
-}
-
-func (m *Model) reconcileSelection(vis []profile.Profile) {
-	for i, p := range vis {
-		if p.ID == m.selectedID {
-			m.cursor = i
-			return
-		}
-	}
-	// Removed/filtered selection falls to the same row, or the preceding last row.
-	m.cursor = clamp(m.cursor, 0, max(0, len(vis)-1))
-	m.rememberSelection(vis)
 }

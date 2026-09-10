@@ -17,6 +17,9 @@ func TestInlineCategoryPromptAndGrouping(t *testing.T) {
 	m.width, m.height = 100, 30
 	p := addPasswordProfile(t, m, "docker-vm")
 	p.Tags = []string{"prod"} // tags must stay separate from the category
+	if err := m.store.Save(); err != nil {
+		t.Fatal(err)
+	}
 
 	m.dispatch(keyRunes("c"))
 	if m.catTarget != p.ID {

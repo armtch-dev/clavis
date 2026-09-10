@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/armtch-dev/clavis/internal/fstxn"
 	"github.com/armtch-dev/clavis/internal/profile"
 	"github.com/armtch-dev/clavis/internal/theme"
 )
@@ -20,12 +21,17 @@ import (
 type identsModel struct {
 	cursor     int
 	confirmDel bool
+	deleteID   string
 }
 
 // usedBy counts the profiles bound to an identity.
 func (m *Model) usedBy(identID string) int {
+	return identityUsers(m.store, identID)
+}
+
+func identityUsers(store *profile.Store, identID string) int {
 	n := 0
-	for _, p := range m.store.Profiles {
+	for _, p := range store.Profiles {
 		if p.IdentityID == identID {
 			n++
 		}
@@ -42,20 +48,67 @@ func (m *Model) updateIdentities(msg tea.Msg) (tea.Model, tea.Cmd) {
 	list := m.idents.Identities
 
 	if s.confirmDel {
-		if (key.String() == "y" || key.String() == "Y") && s.cursor < len(list) {
-			id := list[s.cursor]
-			secrets, err := m.idents.Remove(id.ID)
-			if err == nil {
-				for _, sec := range secrets {
-					m.vault.Delete(sec)
-				}
-				m.setStatus(statusOK, "deleted identity "+id.Name)
+		target := s.deleteID
+		s.confirmDel, s.deleteID = false, ""
+		if (key.String() == "y" || key.String() == "Y") && target != "" {
+			release, err := m.mutationLock()
+			if err != nil {
+				m.setStatus(statusErr, err.Error())
+				return m, nil
 			}
+			defer release()
+			if m.syncing || m.persistenceErr != nil {
+				m.setStatus(statusWarn, "deletion paused — retry after sync/storage recovery")
+				return m, nil
+			}
+			if err := m.idents.CheckCurrentLocked(m.uiLock); err != nil {
+				m.setStatus(statusErr, err.Error())
+				return m, nil
+			}
+			current, err := profile.LoadStoreLocked(m.uiLock)
+			if err != nil {
+				m.setStatus(statusErr, err.Error())
+				return m, nil
+			}
+			id := m.idents.ByID(target)
+			if id == nil {
+				m.setStatus(statusWarn, "identity no longer exists — select it again")
+				return m, nil
+			}
+			if n := max(m.usedBy(target), identityUsers(current, target)); n > 0 {
+				m.setStatus(statusErr, fmt.Sprintf("%s is used by %d profile(s) — edit them first", id.Name, n))
+				return m, nil
+			}
+			if err := m.vault.CheckCurrentLocked(m.uiLock); err != nil {
+				m.setStatus(statusErr, err.Error())
+				return m, nil
+			}
+			name := id.Name
+			err = m.mutate(func(state *diskState, l *fstxn.Lock) ([]fstxn.Change, error) {
+				if identityUsers(state.store, target) > 0 {
+					return nil, fmt.Errorf("identity is now in use — rebind profiles first")
+				}
+				secrets, err := state.idents.Remove(target)
+				if err != nil {
+					return nil, err
+				}
+				changes, err := secretDeletes(secrets)
+				if err != nil {
+					return nil, err
+				}
+				c, err := state.idents.Change()
+				return append(changes, c), err
+			})
+			if err != nil {
+				m.setStatus(statusErr, "delete failed: "+err.Error())
+				return m, nil
+			}
+			m.setStatus(statusOK, "deleted identity "+name)
 			if n := len(m.idents.Identities); s.cursor >= n {
 				s.cursor = max(0, n-1)
 			}
 			s.confirmDel = false
-			return m, m.saveIdents("delete identity " + id.Name)
+			return m, m.afterMutation("delete identity " + name)
 		}
 		s.confirmDel = false
 		return m, nil
@@ -90,6 +143,7 @@ func (m *Model) updateIdentities(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			s.confirmDel = true
+			s.deleteID = list[s.cursor].ID
 		}
 	}
 	return m, nil
@@ -139,8 +193,8 @@ func (m *Model) viewIdentities(width, height int) string {
 		b.WriteString(theme.Dim.Render(fmt.Sprintf("  %d–%d of %d", start+1, min(start+maxRows, len(list)), len(list))) + "\n")
 	}
 
-	if s.confirmDel && s.cursor < len(list) {
-		b.WriteString("\n" + ansi.Truncate(theme.StatusErr.Render("delete “"+list[s.cursor].Name+"” and its vault secrets? ")+
+	if id := m.idents.ByID(s.deleteID); s.confirmDel && id != nil {
+		b.WriteString("\n" + ansi.Truncate(theme.StatusErr.Render("delete “"+id.Name+"” and its vault secrets? ")+
 			hintKeys([][2]string{{"y", "delete"}, {"any", "cancel"}}), cw, "…") + "\n")
 	}
 
@@ -149,16 +203,4 @@ func (m *Model) viewIdentities(width, height int) string {
 		[][2]string{{"enter", "edit"}, {"n", "new"}, {"d", "delete"}, {"esc", "back"}},
 		[][2]string{{"enter", "edit"}, {"n", "new"}, {"d", "del"}, {"esc", "back"}}))
 	return center(theme.Panel.Width(inner).Render(b.String()), width, height)
-}
-
-// saveIdents persists identities.json and, when autosync is on, syncs it.
-func (m *Model) saveIdents(what string) tea.Cmd {
-	if err := m.idents.Save(); err != nil {
-		m.setStatus(statusErr, "save failed: "+err.Error())
-		return nil
-	}
-	if m.cfg.Sync.AutoSync && m.cfg.Sync.Remote != "" {
-		return m.syncCmd("clavis: " + what)
-	}
-	return nil
 }

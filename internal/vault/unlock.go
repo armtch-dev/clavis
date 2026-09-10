@@ -1,12 +1,14 @@
 package vault
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Unlock sources, tried in order by ResolveIdentity:
@@ -59,6 +61,10 @@ func firstKeyLine(s string) string {
 // The key is fed to `security -i` over stdin — never as an argv, which would
 // be visible in the process table.
 func SaveToKeychain(identity string) error {
+	return SaveToKeychainContext(context.Background(), identity)
+}
+
+func SaveToKeychainContext(ctx context.Context, identity string) error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("keychain storage is only available on macOS")
 	}
@@ -66,7 +72,8 @@ func SaveToKeychain(identity string) error {
 	if strings.ContainsAny(identity, "\"'\n\r") {
 		return fmt.Errorf("key contains characters unsafe for keychain storage")
 	}
-	cmd := exec.Command("security", "-i")
+	cmd := exec.CommandContext(ctx, "security", "-i")
+	cmd.WaitDelay = time.Second
 	cmd.Stdin = strings.NewReader(fmt.Sprintf(
 		"add-generic-password -U -s %q -a %q -w %q\n",
 		keychainService, keychainAccount, identity))
@@ -83,10 +90,14 @@ func SaveToKeychain(identity string) error {
 // keeping it machine-local means one machine's convenience choice can never
 // sync to another through config.json.
 func HasKeychain() bool {
+	return HasKeychainContext(context.Background())
+}
+
+func HasKeychainContext(ctx context.Context) bool {
 	if runtime.GOOS != "darwin" {
 		return false
 	}
-	return exec.Command("security", "find-generic-password",
+	return exec.CommandContext(ctx, "security", "find-generic-password",
 		"-s", keychainService, "-a", keychainAccount).Run() == nil
 }
 
@@ -112,11 +123,16 @@ func LoadFromKeychain() (string, error) {
 }
 
 func DeleteFromKeychain() error {
+	return DeleteFromKeychainContext(context.Background())
+}
+
+func DeleteFromKeychainContext(ctx context.Context) error {
 	if runtime.GOOS != "darwin" {
 		return nil
 	}
-	out, err := exec.Command("security", "delete-generic-password",
-		"-s", keychainService, "-a", keychainAccount).CombinedOutput()
+	cmd := exec.CommandContext(ctx, "security", "delete-generic-password", "-s", keychainService, "-a", keychainAccount)
+	cmd.WaitDelay = time.Second
+	out, err := cmd.CombinedOutput()
 	if err != nil && !strings.Contains(string(out), "could not be found") {
 		return fmt.Errorf("security delete-generic-password: %v", err)
 	}
