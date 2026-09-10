@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -66,5 +69,60 @@ func TestReviewMatchingFullKeyOnlyPinStillAuthenticates(t *testing.T) {
 	r := Test(p, Credentials{PrivateKey: key}, time.Second)
 	if !r.OK || r.HostKeyFP != fp || r.HostKeyLine != p.HostKey {
 		t.Fatalf("matching full-key-only pin rejected: %+v", r)
+	}
+}
+
+func TestReviewAskpassDoesNotPersistOrServeUnrelatedProcess(t *testing.T) {
+	key, _ := genKey(t)
+	p := profileFor(t, "127.0.0.1:22")
+	p.ProxyJump = "jump"
+	password := " private fallback "
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd, _, cleanup, err := ExternalKeyCommandContext(ctx, p, Credentials{PrivateKey: key, Password: password})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	var helper string
+	for _, e := range cmd.Env {
+		if value, ok := strings.CutPrefix(e, "SSH_ASKPASS="); ok {
+			helper = value
+		}
+	}
+	if helper == "" {
+		t.Fatal("no supported password handoff")
+	}
+	dir := filepath.Dir(helper)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().IsRegular() {
+			data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), password) {
+				t.Fatal("fallback password persisted in a regular file")
+			}
+		}
+	}
+	// A jump helper inherits askpass and may even have the same user/hostname
+	// on another port. Matching prompt text alone must not authorize a process.
+	out, err := exec.Command(helper, p.User+"@"+p.Host+"'s password: ").Output()
+	if err == nil || len(out) != 0 {
+		t.Fatalf("unrelated process obtained target password: success=%v output bytes=%d", err == nil, len(out))
+	}
+	cancel()
+	cleanup()
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("handoff resources survived cancellation: %v", err)
 	}
 }

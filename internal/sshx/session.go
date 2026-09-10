@@ -2,6 +2,7 @@ package sshx
 
 import (
 	"context"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -246,3 +247,96 @@ func startPTY(sess *ssh.Session, termType string, h, w int) error {
 	}
 	return sess.Shell()
 }
+
+// ExternalKeyCommandContext retains OpenSSH ProxyJump support. Decrypt the
+// stored protected key before handoff so its passphrase is never requested
+// again; a private one-use askpass FIFO supplies any stored password fallback.
+func ExternalKeyCommandContext(ctx context.Context, p profile.Profile, creds Credentials) (*exec.Cmd, *StderrTail, func(), error) {
+	var raw interface{}
+	var err error
+	raw, err = ssh.ParseRawPrivateKey(creds.PrivateKey)
+	var missing *ssh.PassphraseMissingError
+	if errors.As(err, &missing) && creds.Passphrase != "" {
+		raw, err = ssh.ParseRawPrivateKeyWithPassphrase(creds.PrivateKey, []byte(creds.Passphrase))
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// A fingerprint without its full public key cannot be represented by
+	// known_hosts. Refuse rather than silently weakening an existing pin.
+	if p.HostKeyFP != "" && p.HostKey == "" {
+		return nil, nil, nil, errors.New("full pinned host key missing; test this endpoint before a ProxyJump session")
+	}
+	if _, err := pinnedFingerprint(p); err != nil {
+		return nil, nil, nil, err
+	}
+	block, err := ssh.MarshalPrivateKey(raw, "")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	key := pem.EncodeToMemory(block)
+	defer clear(key)
+	cmd, tail, cleanup, err := ExternalCommand(p, key)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dir := filepath.Dir(cmd.Args[2]) // ExternalCommand's private identity path
+	if creds.Password != "" {
+		release, err := passwordHandoff(cmd, dir, p, creds.Password)
+		if err != nil {
+			cleanup()
+			return nil, nil, nil, err
+		}
+		removeFiles := cleanup
+		cleanup = func() { release(); removeFiles() }
+	}
+	// A private known_hosts file records the actual key on first use without
+	// changing the user's SSH configuration. Existing pins disable alternative
+	// global/DNS/key-update sources that could otherwise bypass the stored key.
+	if p.HostKey == "" {
+		kh := filepath.Join(dir, "known_hosts")
+		if err := os.WriteFile(kh, nil, 0600); err != nil {
+			cleanup()
+			return nil, nil, nil, err
+		}
+		cmd.Args = append(cmd.Args[:1], append([]string{"-o", "UserKnownHostsFile=" + kh, "-o", "StrictHostKeyChecking=accept-new"}, cmd.Args[1:]...)...)
+	}
+	cmd.Args = append(cmd.Args[:1], append([]string{"-o", "GlobalKnownHostsFile=/dev/null", "-o", "KnownHostsCommand=none", "-o", "NoHostAuthenticationForLocalhost=no", "-o", "VerifyHostKeyDNS=no", "-o", "UpdateHostKeys=no", "-o", "ControlMaster=no", "-o", "ControlPath=none"}, cmd.Args[1:]...)...)
+	// Keep the foreground terminal process group: moving ssh to a background
+	// group causes SIGTTIN on interactive reads. OpenSSH owns/reaps its ProxyJump
+	// helper when its transport closes; CommandContext owns the direct child.
+	child := exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
+	child.Args[0] = cmd.Args[0] // retain the jump-only environment trampoline name
+	child.Stdin, child.Stdout, child.Stderr = cmd.Stdin, cmd.Stdout, cmd.Stderr
+	child.Env = cmd.Env
+	child.WaitDelay = time.Second
+	// A command may be abandoned before Start. Context cleanup also covers that
+	// case without swallowing application signals or leaking a watcher.
+	stop := closeOnCancel(ctx, cleanupFunc(cleanup))
+	return child, tail, func() { cleanup(); stop() }, nil
+}
+
+// ExternalHostKey returns the actual public key recorded/verified by OpenSSH.
+// Read it after Wait and before cleanup. Only the dedicated per-session file is
+// consulted; caller completion messages must retain their captured endpoint.
+func ExternalHostKey(cmd *exec.Cmd) (fp, line string, err error) {
+	for _, a := range cmd.Args {
+		if !strings.HasPrefix(a, "UserKnownHostsFile=") {
+			continue
+		}
+		data, err := os.ReadFile(strings.TrimPrefix(a, "UserKnownHostsFile="))
+		if err != nil {
+			return "", "", err
+		}
+		_, _, key, _, _, err := ssh.ParseKnownHosts(data)
+		if err != nil {
+			return "", "", err
+		}
+		return ssh.FingerprintSHA256(key), strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))), nil
+	}
+	return "", "", errors.New("session has no private known_hosts file")
+}
+
+type cleanupFunc func()
+
+func (f cleanupFunc) Close() error { f(); return nil }

@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"testing"
@@ -149,6 +152,28 @@ func TestExternalCleanupDoesNotLeak(t *testing.T) {
 	}
 }
 
+func TestContextExternalCleanupIsIdempotentOnNormalExit(t *testing.T) {
+	key, _ := genKey(t)
+	_, _, cleanup, err := ExternalKeyCommandContext(context.Background(), profileFor(t, "127.0.0.1:22"), Credentials{PrivateKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Go(cleanup)
+		}
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("normal context cleanup deadlocked on repetition")
+	}
+}
+
 func encryptedCredential(t *testing.T) (Credentials, ssh.PublicKey) {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -254,5 +279,37 @@ func TestPTYSetupUsesRealSessionRequests(t *testing.T) {
 		}
 		client.Close()
 		cleanup()
+	}
+}
+
+func TestExternalStoredPassphraseAndObservedPin(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("OpenSSH unavailable")
+	}
+	creds, pub := encryptedCredential(t)
+	creds.Password = ""
+	addr, wantFP := lifecycleServer(t, "ok", pub)
+	p := profileFor(t, addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd, _, cleanup, err := ExternalKeyCommandContext(ctx, p, creds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	// Explicit synthetic config: no ambient SSH options, known_hosts or keys.
+	config := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(config, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Args = append(cmd.Args[:1], append([]string{"-F", config, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "GlobalKnownHostsFile=/dev/null"}, cmd.Args[1:]...)...)
+	cmd.Args = append(cmd.Args, "echo clavis-ok")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, io.Discard, io.Discard
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	fp, line, err := ExternalHostKey(cmd)
+	if err != nil || fp != wantFP || line == "" {
+		t.Fatalf("actual external pin: %s %q %v", fp, line, err)
 	}
 }
