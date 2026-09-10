@@ -726,6 +726,11 @@ func (w *wizardModel) updateTest(m *Model, key tea.KeyMsg) (tea.Model, tea.Cmd) 
 		}
 		w.setStep(stepTags)
 		return m, nil
+	case "h", "H":
+		if w.testResult != nil && w.testEndpoint != nil && sameTestTarget(m.effective(w.draft), *w.testEndpoint) {
+			m.openTrust(*w.testEndpoint, *w.testResult, w)
+		}
+		return m, nil
 	}
 	return m, nil
 }

@@ -590,6 +590,9 @@ func (m *Model) dispatchUnlocked(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.panelScroll = 0
 			return m, nil
 		}
+		if m.trust != nil {
+			return m.updateTrust(msg)
+		}
 		if m.screen != scrList {
 			switch msg.String() {
 			case "pgdown":
@@ -640,6 +643,10 @@ func (m *Model) applyTestResult(profileID string, r sshx.TestResult) {
 		return
 	}
 	kind := statusErr
+	if r.Stage == sshx.StageHostKey {
+		m.setStatus(statusErr, fmt.Sprintf("%s: %s — h reviews old/new fingerprints", p.Name, r.Reason))
+		return
+	}
 	m.setStatus(kind, fmt.Sprintf("%s [%s]: %s", p.Name, r.Stage, r.Reason))
 }
 
@@ -931,6 +938,9 @@ func (m *Model) View() string {
 	}
 	if m.errorOpen {
 		body = panelView("Error · c copy · d dismiss · esc back\n"+m.errorDetail, m.width, bodyH, 80, m.panelScroll)
+	}
+	if m.trust != nil {
+		body = m.trust.view(m.width, bodyH)
 	}
 	// Pin the footer to the bottom of the terminal — and never let an
 	// over-tall body push it past the last row: a frame taller than the

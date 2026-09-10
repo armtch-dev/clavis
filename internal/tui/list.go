@@ -253,6 +253,14 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setStatus(statusInfo, "testing "+p.Name+"…")
 			return m, m.testCmd(*p)
 		}
+	case "h":
+		if p := m.selected(vis); p != nil {
+			if result, ok := m.mismatches[p.ID]; ok && sameTestTarget(m.effective(*p), result.endpoint) {
+				m.openTrust(result.endpoint, result.result, nil)
+			} else {
+				m.setStatus(statusWarn, "test this profile first; h reviews a changed host key")
+			}
+		}
 	case "s":
 		return m, m.syncCmd("manual sync")
 	case "i":
