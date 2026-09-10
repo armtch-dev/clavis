@@ -31,6 +31,40 @@ func TestGuardRequiresCompleteHeaderAndRegularMode(t *testing.T) {
 	}
 }
 
+func TestSyncRejectsUnsafeIncomingTreeBeforeCheckout(t *testing.T) {
+	a, _ := newRepo(t)
+	remote := t.TempDir()
+	if _, err := a.git("init", "--bare", "-b", "main", remote); err != nil {
+		t.Fatal(err)
+	}
+	a.SetRemote(remote)
+	if err := a.Sync("initial"); err != nil {
+		t.Fatal(err)
+	}
+	b := New(t.TempDir(), "")
+	if err := b.Bootstrap(remote); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.Dir, "local", "injected"), []byte("unsafe"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-f", "local/injected"}, {"commit", "-m", "unsafe remote fixture"}, {"push", "origin", "main"}} {
+		if _, err := a.git(args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := b.Sync("pull"); err == nil {
+		t.Fatal("unsafe remote accepted")
+	}
+	if _, err := os.Stat(filepath.Join(b.Dir, "local", "injected")); !os.IsNotExist(err) {
+		t.Fatal("unsafe tree reached worktree")
+	}
+	fresh := New(t.TempDir(), "")
+	if err := fresh.Bootstrap(remote); err == nil {
+		t.Fatal("restore accepted unsafe remote")
+	}
+}
+
 func countGit(t testing.TB) (func() int, func()) {
 	t.Helper()
 	real, err := exec.LookPath("git")
@@ -137,6 +171,32 @@ func TestGitCancellationKillsChildrenAndStripsMasterKey(t *testing.T) {
 	}
 }
 
+func TestEnsureRepoRejectsSupportSymlinksBeforeWrite(t *testing.T) {
+	for _, name := range []string{".gitignore", ".git"} {
+		t.Run(name, func(t *testing.T) {
+			dir, outside := t.TempDir(), t.TempDir()
+			target := filepath.Join(outside, "keep")
+			if err := os.WriteFile(target, []byte("unchanged"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			link := target
+			if name == ".git" {
+				link = outside
+			}
+			if err := os.Symlink(link, filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+			if err := New(dir, "").EnsureRepo(); err == nil {
+				t.Fatal("unsafe support symlink accepted")
+			}
+			got, err := os.ReadFile(target)
+			if err != nil || string(got) != "unchanged" {
+				t.Fatal("support write escaped config root")
+			}
+		})
+	}
+}
+
 func TestBatchFrameSubprocess(t *testing.T) {
 	encoded := os.Getenv("TEST_CLAVIS_BATCH_FRAME")
 	if encoded == "" {
@@ -195,5 +255,124 @@ func TestGuardRejectsCaseAliasedSecretPaths(t *testing.T) {
 	oid := strings.Repeat("a", 40)
 	if err := c.guardEntries("100644 " + oid + " 0\tvault/p.age\x00100644 " + oid + " 0\tvault/P.age\x00"); err == nil || !strings.Contains(err.Error(), "alias") {
 		t.Fatalf("case alias wasn't rejected before blob reads: %v", err)
+	}
+}
+
+func TestCanceledRebaseStillAborts(t *testing.T) {
+	a, _ := newRepo(t)
+	remote := t.TempDir()
+	if _, err := a.git("init", "--bare", "-b", "main", remote); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetRemote(remote); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Sync("initial"); err != nil {
+		t.Fatal(err)
+	}
+	b := New(t.TempDir(), "")
+	if err := b.Bootstrap(remote); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		c    *Client
+		data string
+	}{{a, `{"version":1,"profiles":[]}`}, {b, `{"version":1,"profiles":null}`}} {
+		if err := os.WriteFile(filepath.Join(item.c.Dir, "profiles.json"), []byte(item.data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.Sync("remote edit"); err != nil {
+		t.Fatal(err)
+	}
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	ready := filepath.Join(bin, "ready")
+	wrapper := `#!/bin/sh
+case "$*" in
+ *" rebase FETCH_HEAD") "$TEST_REAL_GIT" "$@"; result=$?; printf ready > "$TEST_REBASE_READY"; sleep 10; exit "$result";;
+ *) exec "$TEST_REAL_GIT" "$@";;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(wrapper), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TEST_REAL_GIT", real)
+	t.Setenv("TEST_REBASE_READY", ready)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.Context = ctx
+	done := make(chan error, 1)
+	go func() { done <- b.Sync("local edit") }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("rebase did not reach conflict")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "rebase aborted") {
+			t.Fatalf("cancel cleanup: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("abort remained canceled or hung")
+	}
+	if _, err := os.Stat(filepath.Join(b.Dir, ".git", "rebase-merge")); !os.IsNotExist(err) {
+		t.Fatal("canceled rebase stranded state")
+	}
+	raw, err := os.ReadFile(filepath.Join(b.Dir, "profiles.json"))
+	if err != nil || string(raw) != `{"version":1,"profiles":null}` {
+		t.Fatal("canceled rebase lost local commit")
+	}
+}
+
+func TestPullConflictAbortsRebase(t *testing.T) {
+	a, _ := newRepo(t)
+	remote := t.TempDir()
+	if _, err := a.git("init", "--bare", "-b", "main", remote); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetRemote(remote); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Sync("initial"); err != nil {
+		t.Fatal(err)
+	}
+	b := New(t.TempDir(), "")
+	if err := b.Bootstrap(remote); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		c    *Client
+		data string
+	}{{a, `{"version":1,"profiles":[]}`}, {b, `{"version":1,"profiles":null}`}} {
+		if err := os.WriteFile(filepath.Join(item.c.Dir, "profiles.json"), []byte(item.data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.Sync("A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Sync("B"); err == nil {
+		t.Fatal("expected conflict")
+	}
+	for _, name := range []string{"rebase-merge", "rebase-apply"} {
+		if _, err := os.Stat(filepath.Join(b.Dir, ".git", name)); !os.IsNotExist(err) {
+			t.Fatalf("stranded %s: %v", name, err)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(b.Dir, "profiles.json"))
+	if err != nil || string(raw) != `{"version":1,"profiles":null}` {
+		t.Fatalf("local commit lost: %s %v", raw, err)
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/armtch-dev/clavis/internal/fstxn"
 	"github.com/armtch-dev/clavis/internal/vault"
 )
 
@@ -112,6 +113,22 @@ func (c *Client) IsRepo() bool {
 
 // EnsureRepo initializes the repo and its protective .gitignore.
 func (c *Client) EnsureRepo() error {
+	l, err := fstxn.AcquireContext(c.context(), c.Dir)
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	return c.ensureRepo()
+}
+
+func (c *Client) ensureRepo() error {
+	if fi, err := os.Lstat(filepath.Join(c.Dir, ".git")); err == nil {
+		if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("unsafe .git path; expected a local repository directory")
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	if !c.IsRepo() {
 		if _, err := c.git("init", "-b", DefaultBranch); err != nil {
 			return err
@@ -134,7 +151,18 @@ id_ed25519*
 *.identity
 AGE-SECRET-KEY-*
 `
-	return os.WriteFile(filepath.Join(c.Dir, ".gitignore"), []byte(ignore), 0o600)
+	path := filepath.Join(c.Dir, ".gitignore")
+	if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() {
+		return fmt.Errorf("unsafe .gitignore: not a regular file")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(f, ignore)
+	return errors.Join(err, f.Close())
 }
 
 // allowedPath is the sync allowlist: only these repo-relative paths may ever
@@ -342,6 +370,15 @@ func (c *Client) Guard() error {
 // then the authoritative staged-blob guard; on failure the stage is rolled
 // back so nothing unsafe lingers in the index.
 func (c *Client) Commit(msg string) (bool, error) {
+	l, err := fstxn.AcquireContext(c.context(), c.Dir)
+	if err != nil {
+		return false, err
+	}
+	defer l.Close()
+	return c.commit(msg)
+}
+
+func (c *Client) commit(msg string) (bool, error) {
 	if err := c.ensureIgnore(); err != nil {
 		return false, err
 	}
@@ -355,7 +392,10 @@ func (c *Client) Commit(msg string) (bool, error) {
 		c.git("reset", "-q")
 		return false, err
 	}
-	staged, _ := c.git("diff", "--cached", "--name-only")
+	staged, err := c.git("diff", "--cached", "--name-only")
+	if err != nil {
+		return false, err
+	}
 	if strings.TrimSpace(staged) == "" {
 		return false, nil
 	}
@@ -365,7 +405,16 @@ func (c *Client) Commit(msg string) (bool, error) {
 	return true, nil
 }
 
-func (c *Client) SetRemote(url string) error {
+func (c *Client) SetRemote(remote string) error {
+	l, err := fstxn.AcquireContext(c.context(), c.Dir)
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	return c.setRemote(remote)
+}
+
+func (c *Client) setRemote(url string) error {
 	if _, err := c.git("remote", "get-url", "origin"); err == nil {
 		_, err = c.git("remote", "set-url", "origin", url)
 		return err
@@ -384,17 +433,64 @@ func (c *Client) RemoteURL() string {
 
 // Sync = guarded commit, pull --rebase (tolerating an empty/new remote), push.
 func (c *Client) Sync(msg string) error {
-	if _, err := c.Commit(msg); err != nil {
+	l, err := fstxn.AcquireContext(c.context(), c.Dir)
+	if err != nil {
 		return err
 	}
-	if out, err := c.git("pull", "--rebase", "origin", DefaultBranch); err != nil {
+	defer l.Close()
+	return c.SyncLocked(l, c.RemoteURL(), msg)
+}
+
+func (c *Client) context() context.Context {
+	if c.Context != nil {
+		return c.Context
+	}
+	return context.Background()
+}
+
+// SyncLocked requires exclusive ownership through the caller's coherent reload.
+func (c *Client) SyncLocked(l *fstxn.Lock, remote, msg string) error {
+	if abs, err := filepath.Abs(c.Dir); err != nil || abs != l.Dir() {
+		return fmt.Errorf("sync lock directory mismatch")
+	}
+	if err := c.ensureRepo(); err != nil {
+		return err
+	}
+	if err := c.setRemote(remote); err != nil {
+		return err
+	}
+	if err := c.checkRebase(); err != nil {
+		return err
+	}
+	branch, err := c.git("symbolic-ref", "--short", "HEAD")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(branch) != DefaultBranch {
+		return fmt.Errorf("sync requires branch %s; switch branches before retrying", DefaultBranch)
+	}
+	if _, err := c.commit(msg); err != nil {
+		return err
+	}
+	if out, err := c.git("fetch", "origin", DefaultBranch); err != nil {
 		benign := strings.Contains(out, "couldn't find remote ref") || // brand-new empty repo
 			strings.Contains(out, "no such ref was fetched")
 		if !benign {
 			return err
 		}
+	} else {
+		if err := c.guardTree("FETCH_HEAD"); err != nil {
+			return err
+		}
+		if _, err := c.git("rebase", "FETCH_HEAD"); err != nil {
+			return c.abortRebase(err)
+		}
 	}
-	_, err := c.git("push", "-u", "origin", DefaultBranch)
+	// Rebase may have produced new objects; validate the final index as well.
+	if err := c.guardStaged(); err != nil {
+		return err
+	}
+	_, err = c.git("push", "-u", "origin", DefaultBranch)
 	return err
 }
 
@@ -403,22 +499,79 @@ func (c *Client) Sync(msg string) error {
 // clone: the dir may already hold local files; not pull: nothing to rebase)
 // so fetched tracked files win over anything local.
 func (c *Client) Bootstrap(url string) error {
-	if err := c.EnsureRepo(); err != nil {
+	l, err := fstxn.AcquireContext(c.context(), c.Dir)
+	if err != nil {
 		return err
 	}
-	if err := c.SetRemote(url); err != nil {
+	defer l.Close()
+	return c.BootstrapLocked(l, url)
+}
+
+func (c *Client) BootstrapLocked(l *fstxn.Lock, url string) error {
+	if abs, err := filepath.Abs(c.Dir); err != nil || abs != l.Dir() {
+		return fmt.Errorf("restore lock directory mismatch")
+	}
+	if err := c.ensureRepo(); err != nil {
+		return err
+	}
+	if err := c.setRemote(url); err != nil {
 		return err
 	}
 	if _, err := c.git("fetch", "origin", DefaultBranch); err != nil {
 		return err
 	}
-	_, err := c.git("reset", "--hard", "origin/"+DefaultBranch)
+	if err := c.guardTree("FETCH_HEAD"); err != nil {
+		return err
+	}
+	_, err := c.git("reset", "--hard", "FETCH_HEAD")
 	return err
 }
 
 func (c *Client) Pull() error {
-	_, err := c.git("pull", "--rebase", "origin", DefaultBranch)
-	return err
+	l, err := fstxn.AcquireContext(c.context(), c.Dir)
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	if err := c.checkRebase(); err != nil {
+		return err
+	}
+	if _, err := c.git("fetch", "origin", DefaultBranch); err != nil {
+		return err
+	}
+	if err := c.guardTree("FETCH_HEAD"); err != nil {
+		return err
+	}
+	_, err = c.git("rebase", "FETCH_HEAD")
+	if err != nil {
+		return c.abortRebase(err)
+	}
+	return nil
+}
+
+func (c *Client) checkRebase() error {
+	for _, name := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD"} {
+		if _, err := os.Stat(filepath.Join(c.Dir, ".git", name)); err == nil {
+			return fmt.Errorf("unfinished Git operation (%s); resolve or abort it before syncing", name)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) abortRebase(cause error) error {
+	if c.checkRebase() == nil {
+		return cause
+	}
+	cleanup := *c
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cleanup.Context = ctx
+	if _, err := cleanup.git("rebase", "--abort"); err != nil {
+		return fmt.Errorf("%w; automatic abort failed: %v; local commits retained, run git rebase --abort before retrying", cause, err)
+	}
+	return fmt.Errorf("%w; rebase aborted, local commits retained; reconcile conflicting edits before retrying", cause)
 }
 
 // --- GitHub bootstrap ---
