@@ -1,9 +1,8 @@
-// Package probe implements a background TCP reachability/latency monitor
-// for SSH hosts. Each target is probed on its own goroutine at a fixed
-// interval; results are reported via a callback and cached for Snapshot.
+// Package probe monitors TCP reachability with shared address-level probes.
 package probe
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -14,200 +13,293 @@ import (
 	"time"
 )
 
-// historySize is the number of recent probe results retained per target.
 const historySize = 30
+const maxConcurrent = 16
 
-// Target identifies a host to probe.
 type Target struct {
 	ProfileID string
-	Addr      string // host:port
+	Addr      string
 }
 
-// Status is the result of the most recent probe for a target, along with
-// recent history.
 type Status struct {
-	ProfileID string
-	Reachable bool
-	LatencyMs float64   // valid only when Reachable
-	LastSeen  time.Time // last successful probe (zero if never)
-	CheckedAt time.Time // when this probe ran
-	History   []float64 // most recent last, up to 30 entries; -1 == failed probe
-	Err       string    // short reason when unreachable, e.g. "connection refused", "timeout"
+	ProfileID  string
+	Addr       string // actual probed address; retained in queued UI messages
+	Generation uint64 // target incarnation, including removal/re-add at the same address
+	Reachable  bool
+	LatencyMs  float64
+	LastSeen   time.Time
+	CheckedAt  time.Time
+	History    []float64
+	Err        string
 }
 
-// target tracks the running state for a single probed address.
-type probeState struct {
-	target    Target
-	stop      chan struct{}
-	kick      chan struct{} // nudges the loop to probe now (e.g. on resume)
-	history   []float64     // ring buffer contents in chronological order, oldest first
-	lastSeen  time.Time
-	fails     int  // consecutive failures, drives backoff
-	suspended bool // probing paused (an interactive session owns this host)
+type profileState struct {
+	target     Target
+	generation uint64
 }
 
-// Monitor probes a set of TCP targets in the background and reports status
-// via a notify callback. A Monitor is safe for concurrent use.
+type addressState struct {
+	addr         string
+	ctx          context.Context
+	cancel       context.CancelFunc
+	kick         chan struct{}
+	activeCancel context.CancelFunc
+	fails        int
+}
+
+// Monitor is safe for concurrent use. notify must return promptly and must not
+// call SetTargets, Suspend or Stop (Snapshot/Current are safe). Delivery is
+// serialized with target changes so removed work cannot publish late callbacks.
 type Monitor struct {
-	interval time.Duration
-	timeout  time.Duration
-	notify   func(Status)
-
-	mu     sync.Mutex
-	states map[string]*probeState // by ProfileID
-	last   map[string]Status      // by ProfileID, latest reported status
-	wg     sync.WaitGroup
+	interval, timeout time.Duration
+	notify            func(Status)
+	delivery          sync.Mutex
+	mu                sync.Mutex
+	states            map[string]*profileState
+	addresses         map[string]*addressState
+	last              map[string]Status
+	owners            map[string]string // session owner ID -> captured address
+	sem               chan struct{}
+	wg                sync.WaitGroup
+	stopped           bool
+	generation        uint64
 }
 
-// New creates a monitor. interval is the probe period (production: 15s),
-// timeout the per-dial timeout (production: 3s). notify is called after every
-// probe, from the probing goroutine — it must be safe for concurrent calls.
 func New(interval, timeout time.Duration, notify func(Status)) *Monitor {
-	return &Monitor{
-		interval: interval,
-		timeout:  timeout,
-		notify:   notify,
-		states:   make(map[string]*probeState),
-		last:     make(map[string]Status),
-	}
+	return &Monitor{interval: interval, timeout: timeout, notify: notify,
+		states: make(map[string]*profileState), addresses: make(map[string]*addressState),
+		last: make(map[string]Status), owners: make(map[string]string), sem: make(chan struct{}, maxConcurrent)}
 }
 
-// SetTargets reconciles the probed set: starts goroutines for new targets,
-// stops goroutines for removed ones, restarts a target whose Addr changed.
-// Safe to call at any time from any goroutine.
 func (m *Monitor) SetTargets(targets []Target) {
+	m.delivery.Lock()
+	defer m.delivery.Unlock()
 	m.mu.Lock()
-
+	defer m.mu.Unlock()
+	if m.stopped {
+		return
+	}
 	wanted := make(map[string]Target, len(targets))
 	for _, t := range targets {
 		wanted[t.ProfileID] = t
 	}
-
-	// Stop and remove targets that are gone or whose address changed.
 	for id, st := range m.states {
-		t, ok := wanted[id]
-		if !ok || t.Addr != st.target.Addr {
-			close(st.stop)
+		if t, ok := wanted[id]; !ok || t.Addr != st.target.Addr {
 			delete(m.states, id)
 			delete(m.last, id)
 		}
 	}
-
-	// Start new targets (including ones just removed above due to Addr change).
-	var toStart []Target
 	for id, t := range wanted {
-		if _, ok := m.states[id]; !ok {
-			toStart = append(toStart, t)
+		if m.states[id] == nil {
+			m.generation++
+			m.states[id] = &profileState{target: t, generation: m.generation}
 		}
 	}
-
-	for _, t := range toStart {
-		st := &probeState{
-			target: t,
-			stop:   make(chan struct{}),
-			kick:   make(chan struct{}, 1),
+	addrs := make(map[string]bool)
+	for _, st := range m.states {
+		addrs[st.target.Addr] = true
+	}
+	for addr, st := range m.addresses {
+		if !addrs[addr] {
+			st.cancel()
+			delete(m.addresses, addr)
 		}
-		m.states[t.ProfileID] = st
+	}
+	for addr := range addrs {
+		if m.addresses[addr] != nil {
+			continue
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		st := &addressState{addr: addr, ctx: ctx, cancel: cancel, kick: make(chan struct{}, 1)}
+		m.addresses[addr] = st
 		m.wg.Add(1)
 		go m.run(st)
 	}
-
-	m.mu.Unlock()
 }
 
-// Snapshot returns the latest Status for every current target (map by ProfileID).
 func (m *Monitor) Snapshot() map[string]Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	out := make(map[string]Status, len(m.last))
 	for id, s := range m.last {
-		if _, ok := m.states[id]; !ok {
-			continue // removed but not yet cleaned up (shouldn't happen, defensive)
-		}
 		s.History = append([]float64(nil), s.History...)
 		out[id] = s
 	}
 	return out
 }
 
-// Suspend pauses (or resumes) probing for one target without tearing down
-// its goroutine or history. Used while an interactive session owns the host:
-// probing it then is redundant, and some hosts sit behind gateways that
-// rate-limit new SSH connections per source — extra probes during a connect
-// burst are exactly what trips them. Resuming kicks an immediate probe so
-// the status refreshes as soon as the session ends.
-func (m *Monitor) Suspend(profileID string, on bool) {
+// Current lets consumers reject already-queued callbacks after target changes.
+func (m *Monitor) Current(s Status) bool {
 	m.mu.Lock()
-	st, ok := m.states[profileID]
-	if ok && st.suspended != on {
-		st.suspended = on
-		if !on {
-			select {
-			case st.kick <- struct{}{}:
-			default:
-			}
-		}
-	}
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	st := m.states[s.ProfileID]
+	return st != nil && st.target.Addr == s.Addr && st.generation == s.Generation
 }
 
-// Stop terminates all probe goroutines and waits for them to exit.
-func (m *Monitor) Stop() {
-	m.mu.Lock()
-	for _, st := range m.states {
-		close(st.stop)
+func (m *Monitor) suspended(addr string) bool {
+	for _, owned := range m.owners {
+		if owned == addr {
+			return true
+		}
 	}
-	m.states = make(map[string]*probeState)
-	m.mu.Unlock()
+	return false
+}
 
+func (m *Monitor) kick(st *addressState) {
+	select {
+	case st.kick <- struct{}{}:
+	default:
+	}
+}
+
+// Any profile owning an address pauses all its siblings, including in-flight
+// banner reads. Each profile retains its own suspension until explicitly resumed.
+func (m *Monitor) Suspend(id string, on bool) {
+	m.delivery.Lock()
+	defer m.delivery.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	addr, owned := m.owners[id]
+	if owned == on {
+		return
+	}
+	if on {
+		p := m.states[id]
+		if p == nil {
+			return
+		}
+		addr = p.target.Addr
+		m.owners[id] = addr
+	} else {
+		delete(m.owners, id)
+	}
+	st := m.addresses[addr]
+	if st == nil {
+		return
+	}
+	if on && st.activeCancel != nil {
+		st.activeCancel()
+	}
+	if !m.suspended(st.addr) {
+		m.kick(st)
+	}
+}
+
+// Stop is terminal and idempotent: SetTargets after Stop does not restart work.
+func (m *Monitor) Stop() {
+	m.delivery.Lock()
+	m.mu.Lock()
+	m.stopped = true
+	for _, st := range m.addresses {
+		st.cancel()
+	}
+	clear(m.states)
+	clear(m.addresses)
+	clear(m.last)
+	clear(m.owners)
+	m.mu.Unlock()
+	m.delivery.Unlock()
 	m.wg.Wait()
 }
 
-// run is the per-target probing goroutine.
-func (m *Monitor) run(st *probeState) {
+func (m *Monitor) run(st *addressState) {
 	defer m.wg.Done()
-
-	// Jitter the first probe so many targets don't fire simultaneously.
-	jitter := time.Duration(rand.Int63n(int64(m.interval)/5 + 1))
-	timer := time.NewTimer(jitter)
+	timer := time.NewTimer(time.Duration(rand.Int63n(int64(max(m.interval, 0))/5 + 1)))
 	defer timer.Stop()
-
-	select {
-	case <-st.stop:
-		return
-	case <-timer.C:
-	}
-
 	for {
+		select {
+		case <-st.ctx.Done():
+			return
+		case <-timer.C:
+		case <-st.kick:
+		}
+		m.probeAndReport(st)
 		m.mu.Lock()
-		suspended := st.suspended
 		fails := st.fails
 		m.mu.Unlock()
+		timer.Reset(backoff(m.interval, fails))
+	}
+}
 
-		if !suspended {
-			m.probeAndReport(st)
-			m.mu.Lock()
-			fails = st.fails
-			m.mu.Unlock()
+func (m *Monitor) probeAndReport(st *addressState) {
+	// Queuing is cancellable, and the permit covers both dial and banner read.
+	select {
+	case m.sem <- struct{}{}:
+	case <-st.ctx.Done():
+		return
+	}
+	defer func() { <-m.sem }()
+	m.mu.Lock()
+	if m.addresses[st.addr] != st || m.suspended(st.addr) {
+		m.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithTimeout(st.ctx, m.timeout)
+	st.activeCancel = cancel
+	// Only profiles present at the start receive this observation.
+	members := make(map[string]*profileState)
+	for id, p := range m.states {
+		if p.target.Addr == st.addr {
+			members[id] = p
 		}
-
-		wait := time.NewTimer(backoff(m.interval, fails))
-		select {
-		case <-st.stop:
-			wait.Stop()
-			return
-		case <-st.kick:
-			wait.Stop()
-		case <-wait.C:
+	}
+	m.mu.Unlock()
+	defer cancel()
+	checked := time.Now()
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", st.addr)
+	elapsed := time.Since(checked)
+	if err == nil {
+		stop := context.AfterFunc(ctx, func() { conn.Close() })
+		deadline, _ := ctx.Deadline()
+		conn.SetDeadline(deadline)
+		fmt.Fprint(conn, "SSH-2.0-clavis_probe\r\n")
+		var buf [256]byte
+		conn.Read(buf[:]) // best-effort banner; reachability means TCP
+		conn.Close()
+		stop()
+	}
+	m.delivery.Lock()
+	defer m.delivery.Unlock()
+	m.mu.Lock()
+	st.activeCancel = nil
+	if m.addresses[st.addr] != st || m.suspended(st.addr) || errors.Is(ctx.Err(), context.Canceled) {
+		m.mu.Unlock()
+		return
+	}
+	if err == nil {
+		st.fails = 0
+	} else {
+		st.fails++
+	}
+	var results []Status
+	for id, p := range members {
+		if m.states[id] != p {
+			continue
+		}
+		s := m.last[id]
+		s.ProfileID, s.Addr, s.Generation = id, st.addr, p.generation
+		s.CheckedAt, s.Reachable, s.Err, s.LatencyMs = checked, err == nil, "", 0
+		v := -1.0
+		if err == nil {
+			v = float64(elapsed) / float64(time.Millisecond)
+			s.LatencyMs = v
+			s.LastSeen = checked
+		} else {
+			s.Err = classifyErr(err)
+		}
+		s.History = appendHistory(s.History, v)
+		m.last[id] = s
+		s.History = append([]float64(nil), s.History...)
+		results = append(results, s)
+	}
+	m.mu.Unlock()
+	for _, s := range results {
+		if m.notify != nil {
+			m.notify(s)
 		}
 	}
 }
 
-// backoff stretches the probe interval after consecutive failures, doubling
-// per failure up to a 5-minute cap. A host that drops SSH probes is often
-// rate-limiting the source (fail2ban, gateway SYN limits); hammering it every
-// interval keeps the block alive — the exact failure mode backing off breaks.
 func backoff(interval time.Duration, fails int) time.Duration {
 	if fails <= 0 {
 		return interval
@@ -222,77 +314,6 @@ func backoff(interval time.Duration, fails int) time.Duration {
 	return d
 }
 
-// probeAndReport performs a single probe, updates state, and invokes notify.
-func (m *Monitor) probeAndReport(st *probeState) {
-	checkedAt := time.Now()
-	start := time.Now()
-	conn, err := net.DialTimeout("tcp", st.target.Addr, m.timeout)
-	elapsed := time.Since(start)
-	if err == nil {
-		// Before the lock: the banner exchange can block up to 2s, and
-		// Suspend/SetTargets (called from the UI thread) wait on this mutex.
-		politeClose(conn)
-	}
-
-	var status Status
-	m.mu.Lock()
-
-	// The target may have been removed/replaced between scheduling and
-	// running this probe; if so, don't resurrect its state.
-	if cur, ok := m.states[st.target.ProfileID]; !ok || cur != st {
-		m.mu.Unlock()
-		return
-	}
-
-	if err == nil {
-		latencyMs := float64(elapsed) / float64(time.Millisecond)
-		st.lastSeen = checkedAt
-		st.fails = 0
-		st.history = appendHistory(st.history, latencyMs)
-		status = Status{
-			ProfileID: st.target.ProfileID,
-			Reachable: true,
-			LatencyMs: latencyMs,
-			LastSeen:  st.lastSeen,
-			CheckedAt: checkedAt,
-			History:   append([]float64(nil), st.history...),
-		}
-	} else {
-		st.fails++
-		st.history = appendHistory(st.history, -1)
-		status = Status{
-			ProfileID: st.target.ProfileID,
-			Reachable: false,
-			LastSeen:  st.lastSeen,
-			CheckedAt: checkedAt,
-			History:   append([]float64(nil), st.history...),
-			Err:       classifyErr(err),
-		}
-	}
-
-	m.last[st.target.ProfileID] = status
-	m.mu.Unlock()
-
-	m.notify(status)
-}
-
-// politeClose completes the SSH identification exchange before hanging up.
-// A bare connect-then-close makes sshd log "did not receive identification
-// string" — the signature port scanners leave, and what aggressive fail2ban
-// filters and OpenSSH 9.8+ PerSourcePenalties key on. Sending a client
-// banner and draining the server's costs one round-trip and keeps the probe
-// indistinguishable from a well-behaved client that changed its mind.
-func politeClose(conn net.Conn) {
-	deadline := time.Now().Add(2 * time.Second)
-	conn.SetDeadline(deadline)
-	fmt.Fprintf(conn, "SSH-2.0-clavis_probe\r\n")
-	buf := make([]byte, 256)
-	conn.Read(buf) // best-effort drain of the server banner
-	conn.Close()
-}
-
-// appendHistory appends v to history, capping the length at historySize by
-// dropping the oldest entries.
 func appendHistory(history []float64, v float64) []float64 {
 	history = append(history, v)
 	if len(history) > historySize {
@@ -301,7 +322,6 @@ func appendHistory(history []float64, v float64) []float64 {
 	return history
 }
 
-// classifyErr turns a dial error into a short human-readable reason.
 func classifyErr(err error) string {
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
@@ -310,24 +330,19 @@ func classifyErr(err error) string {
 		}
 		return "dns lookup failed"
 	}
-
 	if errors.Is(err, syscall.ECONNREFUSED) {
 		return "connection refused"
 	}
-
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return "timeout"
 	}
-
 	if os.IsTimeout(err) {
 		return "timeout"
 	}
-
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
 		return opErr.Err.Error()
 	}
-
 	return err.Error()
 }
