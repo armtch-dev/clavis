@@ -1,230 +1,301 @@
+// Package sshconfig imports the representable subset of OpenSSH configuration.
+// It never executes Match exec, proxies, hostname canonicalization or ssh itself.
 package sshconfig
 
 import (
 	"bufio"
+	"fmt"
 	"os"
-	"os/user"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
 
-// Entry represents a parsed SSH config host entry.
 type Entry struct {
-	Alias        string // the Host token
-	HostName     string // HostName directive, or Alias if absent
-	User         string // may be empty
-	Port         int    // 22 if absent
-	IdentityFile string // first IdentityFile, ~ expanded to the home dir, empty if none
-	ProxyJump    string // may be empty
+	Alias        string
+	HostName     string
+	User         string
+	Port         int
+	IdentityFile string // first configured identity; OpenSSH itself can try several
+	ProxyJump    string
 }
 
-// Parse parses ssh_config text. baseDir is used to resolve relative Include
-// globs (typically ~/.ssh); home is the user home dir for ~ expansion.
+type directive struct {
+	key      string
+	args     []string
+	children []directive
+}
+
+// Parse evaluates each discovered literal alias against the complete config,
+// preserving first-value semantics and active Include context. Relative Includes
+// use baseDir at every depth (normally ~/.ssh), not the included file's directory.
+// Unknown, unrelated SSH options are ignored. Options requiring execution or
+// changing the connection in ways a Profile cannot represent fail explicitly.
 func Parse(text string, baseDir, home string) ([]Entry, error) {
 	return parseWithDepth(text, baseDir, home, 0)
 }
 
-// ParseFile reads path and parses it (baseDir = dir of path, home = os.UserHomeDir()).
 func ParseFile(path string) ([]Entry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-
-	baseDir := filepath.Dir(path)
-	return Parse(string(data), baseDir, home)
+	// OpenSSH user config Includes are relative to ~/.ssh even with -F;
+	// neither the main file nor a nested include changes that base directory.
+	return Parse(string(data), filepath.Join(home, ".ssh"), home)
 }
 
 func parseWithDepth(text string, baseDir, home string, depth int) ([]Entry, error) {
-	const maxDepth = 8
-	if depth > maxDepth {
-		return nil, nil
+	nodes, err := readDirectives(text, baseDir, home, depth)
+	if err != nil {
+		return nil, err
 	}
-
+	var aliases []string
+	seen := map[string]bool{}
+	var discover func([]directive)
+	discover = func(nodes []directive) {
+		for _, n := range nodes {
+			if n.key == "host" {
+				for _, a := range n.args {
+					if !strings.ContainsAny(a, "*?!") && !seen[a] {
+						seen[a] = true
+						aliases = append(aliases, a)
+					}
+				}
+			}
+			discover(n.children)
+		}
+	}
+	discover(nodes)
 	var entries []Entry
-	seenAliases := make(map[string]bool)
-
-	scanner := bufio.NewScanner(strings.NewReader(text))
-	var currentEntries []*Entry // One entry per alias on current Host line
-
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		// Strip comments
-		if idx := strings.Index(line, "#"); idx >= 0 {
-			line = line[:idx]
-		}
-		line = strings.TrimSpace(line)
-
-		// Skip blank lines
-		if line == "" {
-			continue
-		}
-
-		// Parse directive
-		parts := strings.SplitN(line, " ", 2)
-		if len(parts) < 1 {
-			continue
-		}
-
-		directive := strings.ToLower(parts[0])
-		var value string
-		if len(parts) > 1 {
-			value = parts[1]
-		}
-
-		// Handle key=value syntax
-		if strings.Contains(directive, "=") {
-			kv := strings.SplitN(directive, "=", 2)
-			directive = strings.ToLower(kv[0])
-			if len(kv) > 1 {
-				value = kv[1]
-				if len(parts) > 1 {
-					value = kv[1] + " " + value
-				}
-			}
-		} else if strings.Contains(value, "=") {
-			// Value contains = sign
-			kv := strings.SplitN(value, "=", 2)
-			if len(kv) > 1 {
-				value = kv[1]
-			}
-		}
-
-		value = strings.TrimSpace(value)
-
-		switch directive {
-		case "host":
-			// Save previous entries if they exist
-			for _, entry := range currentEntries {
-				if entry.Alias != "" && !seenAliases[entry.Alias] {
-					entries = append(entries, *entry)
-					seenAliases[entry.Alias] = true
-				}
-			}
-			currentEntries = nil
-
-			// Parse Host patterns
-			patterns := strings.Fields(value)
-			for _, pattern := range patterns {
-				// Skip wildcards and negations
-				if strings.ContainsAny(pattern, "*?") || strings.HasPrefix(pattern, "!") {
-					continue
-				}
-
-				// Create new entry for this pattern
-				newEntry := &Entry{
-					Alias:    pattern,
-					HostName: pattern,
-					Port:     22,
-				}
-				currentEntries = append(currentEntries, newEntry)
-			}
-
-		case "hostname":
-			for _, entry := range currentEntries {
-				if entry.HostName == entry.Alias {
-					entry.HostName = stripQuotes(value)
-				}
-			}
-
-		case "user":
-			for _, entry := range currentEntries {
-				if entry.User == "" {
-					entry.User = stripQuotes(value)
-				}
-			}
-
-		case "port":
-			for _, entry := range currentEntries {
-				if entry.Port == 22 {
-					port, err := strconv.Atoi(stripQuotes(value))
-					if err == nil && port > 0 {
-						entry.Port = port
+	for _, alias := range aliases {
+		values := map[string]string{}
+		var evaluate func([]directive, bool)
+		evaluate = func(nodes []directive, active bool) {
+			for _, n := range nodes {
+				switch n.key {
+				case "host":
+					active = matches(alias, n.args)
+				case "include":
+					if active {
+						evaluate(n.children, active)
 					}
-				}
-			}
-
-		case "identityfile":
-			for _, entry := range currentEntries {
-				if entry.IdentityFile == "" {
-					idFile := stripQuotes(value)
-					idFile = expandHome(idFile, home)
-					entry.IdentityFile = idFile
-				}
-			}
-
-		case "proxyjump":
-			for _, entry := range currentEntries {
-				if entry.ProxyJump == "" {
-					entry.ProxyJump = stripQuotes(value)
-				}
-			}
-
-		case "include":
-			// Save current entries before processing includes
-			for _, entry := range currentEntries {
-				if entry.Alias != "" && !seenAliases[entry.Alias] {
-					entries = append(entries, *entry)
-					seenAliases[entry.Alias] = true
-				}
-			}
-			currentEntries = nil
-
-			// Parse Include directive - may appear outside Host blocks
-			includes := strings.Fields(value)
-			for _, include := range includes {
-				include = expandHome(include, home)
-				// Resolve as glob relative to baseDir
-				pattern := include
-				if !filepath.IsAbs(include) {
-					pattern = filepath.Join(baseDir, include)
-				}
-
-				files, err := filepath.Glob(pattern)
-				if err != nil {
-					continue
-				}
-
-				for _, file := range files {
-					data, err := os.ReadFile(file)
-					if err != nil {
-						continue
+				case "proxycommand", "proxyjump":
+					// OpenSSH treats these as alternatives: even an explicit
+					// ProxyCommand none prevents a later ProxyJump taking effect.
+					_, commandSet := values["proxycommand"]
+					_, jumpSet := values["proxyjump"]
+					if active && !commandSet && !jumpSet {
+						values[n.key] = n.args[0]
 					}
-
-					newBaseDir := filepath.Dir(file)
-					subEntries, _ := parseWithDepth(string(data), newBaseDir, home, depth+1)
-
-					for _, entry := range subEntries {
-						if !seenAliases[entry.Alias] {
-							entries = append(entries, entry)
-							seenAliases[entry.Alias] = true
+				default:
+					if active {
+						if _, set := values[n.key]; !set {
+							values[n.key] = n.args[0]
 						}
 					}
 				}
 			}
 		}
+		evaluate(nodes, true)
+		e := Entry{Alias: alias, HostName: alias, Port: 22, User: values["user"], IdentityFile: expandHome(values["identityfile"], home), ProxyJump: values["proxyjump"]}
+		if v, ok := values["hostname"]; ok {
+			e.HostName = v
+		}
+		if v, ok := values["port"]; ok {
+			e.Port, _ = strconv.Atoi(v)
+		}
+		if e.ProxyJump == "none" {
+			e.ProxyJump = ""
+		}
+		if e.IdentityFile == "none" {
+			e.IdentityFile = ""
+		}
+		entries = append(entries, e)
 	}
+	return entries, nil
+}
 
-	// Save the remaining entries if they exist
-	for _, entry := range currentEntries {
-		if entry.Alias != "" && !seenAliases[entry.Alias] {
-			entries = append(entries, *entry)
-			seenAliases[entry.Alias] = true
+func readDirectives(text, baseDir, home string, depth int) ([]directive, error) {
+	if depth > 16 {
+		return nil, fmt.Errorf("SSH Include nesting exceeds 16 (possible cycle)")
+	}
+	var nodes []directive
+	scanner := bufio.NewScanner(strings.NewReader(text))
+	for line := 1; scanner.Scan(); line++ {
+		key, args, err := tokenize(scanner.Text())
+		if err != nil {
+			return nil, fmt.Errorf("SSH config line %d: %w", line, err)
+		}
+		if key == "" {
+			continue
+		}
+		if len(args) == 0 {
+			return nil, fmt.Errorf("SSH config line %d: %s requires a value", line, key)
+		}
+		n := directive{key: key, args: args}
+		switch key {
+		case "canonicalizehostname":
+			if len(args) == 1 && strings.EqualFold(args[0], "no") {
+				continue
+			}
+			return nil, fmt.Errorf("%s requires disabled value 'no' for profile import", key)
+		case "proxycommand":
+			if len(args) != 1 || !strings.EqualFold(args[0], "none") {
+				return nil, fmt.Errorf("%s requires disabled value 'none' for profile import", key)
+			}
+		case "match", "hostnamecanonicalization":
+			return nil, fmt.Errorf("%s is not supported by profile import; resolve this config with OpenSSH before importing", key)
+		case "host":
+			for _, a := range args {
+				if a == "!" || strings.ContainsAny(a, " \t\r\n") {
+					return nil, fmt.Errorf("invalid Host pattern %q", a)
+				}
+			}
+		case "include":
+			for _, pattern := range args {
+				if err := supportedPath(pattern); err != nil {
+					return nil, err
+				}
+				pattern = expandHome(pattern, home)
+				if !filepath.IsAbs(pattern) {
+					pattern = filepath.Join(baseDir, pattern)
+				}
+				files, err := filepath.Glob(pattern)
+				if err != nil {
+					return nil, fmt.Errorf("Include: %w", err)
+				}
+				for _, file := range files {
+					data, err := os.ReadFile(file)
+					if err != nil {
+						return nil, fmt.Errorf("Include %s: %w", file, err)
+					}
+					children, err := readDirectives(string(data), baseDir, home, depth+1)
+					if err != nil {
+						return nil, fmt.Errorf("Include %s: %w", file, err)
+					}
+					// OpenSSH restores the caller's active Host context after
+					// each file, including individual matches of one Include glob.
+					n.children = append(n.children, directive{key: "include", children: children})
+				}
+			}
+		case "hostname", "user", "port", "identityfile", "proxyjump":
+			if len(args) != 1 || args[0] == "" {
+				return nil, fmt.Errorf("%s requires exactly one non-empty value", key)
+			}
+			if strings.Contains(args[0], "%") || strings.Contains(args[0], "${") {
+				return nil, fmt.Errorf("%s token expansion is not supported by profile import", key)
+			}
+			if key == "port" {
+				port, err := strconv.Atoi(args[0])
+				if err != nil || port < 1 || port > 65535 {
+					return nil, fmt.Errorf("invalid SSH port %q", args[0])
+				}
+			}
+			if key == "identityfile" {
+				if err := supportedPath(args[0]); err != nil {
+					return nil, err
+				}
+			}
+		default:
+			continue // unrelated transport/UI options are not profile fields
+		}
+		nodes = append(nodes, n)
+	}
+	return nodes, scanner.Err()
+}
+
+// Split only the directive separator; '=' and '#' inside value tokens are data.
+// Quotes can contain whitespace/comments, and escaped quotes stay in the value.
+func tokenize(line string) (string, []string, error) {
+	line = strings.TrimSpace(line)
+	if line == "" || line[0] == '#' {
+		return "", nil, nil
+	}
+	i := strings.IndexAny(line, " \t=")
+	if i < 0 {
+		return strings.ToLower(line), nil, nil
+	}
+	key := strings.ToLower(line[:i])
+	line = strings.TrimLeft(line[i:], " \t")
+	if strings.HasPrefix(line, "=") {
+		line = strings.TrimLeft(line[1:], " \t")
+	}
+	var args []string
+	for len(line) > 0 && line[0] != '#' {
+		var b strings.Builder
+		var quote byte
+		i := 0
+		for i < len(line) {
+			c := line[i]
+			if quote == 0 && (c == ' ' || c == '\t') {
+				break
+			}
+			if c == '\\' && i+1 < len(line) && (line[i+1] == '"' || line[i+1] == '\'' || line[i+1] == '\\' || quote == 0 && line[i+1] == ' ') {
+				i++
+				b.WriteByte(line[i])
+				i++
+				continue
+			}
+			if quote == 0 && (c == '"' || c == '\'') {
+				quote = c
+			} else if quote != 0 && c == quote {
+				quote = 0
+			} else {
+				b.WriteByte(c)
+			}
+			i++
+		}
+		if quote != 0 {
+			return "", nil, fmt.Errorf("unterminated quote")
+		}
+		args = append(args, b.String())
+		line = strings.TrimLeft(line[i:], " \t")
+	}
+	return key, args, nil
+}
+
+func matches(alias string, patterns []string) bool {
+	matched := false
+	for _, p := range patterns {
+		neg := strings.HasPrefix(p, "!")
+		p = strings.TrimPrefix(p, "!")
+		rx := regexp.QuoteMeta(p)
+		rx = strings.ReplaceAll(strings.ReplaceAll(rx, `\*`, `.*`), `\?`, `.`)
+		ok, _ := regexp.MatchString("^"+rx+"$", alias)
+		if ok {
+			if neg {
+				return false
+			}
+			matched = true
 		}
 	}
+	return matched
+}
 
-	if err := scanner.Err(); err != nil {
-		return nil, err
+func supportedPath(path string) error {
+	if strings.HasPrefix(path, "~") && path != "~" && !strings.HasPrefix(path, "~/") {
+		return fmt.Errorf("named-user tilde expansion is not supported: %q", path)
 	}
+	if strings.ContainsAny(path, "%") || strings.Contains(path, "${") {
+		return fmt.Errorf("SSH path token expansion is not supported: %q", path)
+	}
+	return nil
+}
 
-	return entries, nil
+func expandHome(path, home string) string {
+	if path == "~" {
+		return home
+	}
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(home, path[2:])
+	}
+	return path
 }
 
 func stripQuotes(s string) string {
@@ -233,18 +304,4 @@ func stripQuotes(s string) string {
 		return s[1 : len(s)-1]
 	}
 	return s
-}
-
-func expandHome(path, home string) string {
-	if strings.HasPrefix(path, "~") {
-		if home == "" {
-			u, err := user.Current()
-			if err != nil {
-				return path
-			}
-			home = u.HomeDir
-		}
-		return filepath.Join(home, path[1:])
-	}
-	return path
 }

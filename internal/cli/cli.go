@@ -398,11 +398,16 @@ func ImportSSHConfig(w io.Writer, configDir, path string) error {
 		return nil
 	}
 
-	store, err := profile.LoadStore(configDir)
+	l, err := fstxn.Acquire(configDir)
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	store, err := profile.LoadStoreLocked(l)
 	if err != nil {
 		return fmt.Errorf("loading profile store: %w", err)
 	}
-	v, err := vault.Load(configDir)
+	v, err := vault.LoadLocked(l)
 	if err != nil {
 		return fmt.Errorf("loading vault: %w", err)
 	}
@@ -414,6 +419,7 @@ func ImportSSHConfig(w io.Writer, configDir, path string) error {
 
 	type outcome struct{ alias, status string }
 	var results []outcome
+	var changes []fstxn.Change
 	imported := 0
 
 	for _, e := range entries {
@@ -450,16 +456,22 @@ func ImportSSHConfig(w io.Writer, configDir, path string) error {
 			case rerr != nil:
 				results = append(results, outcome{e.Alias, fmt.Sprintf("imported — WARNING: identity file %s unreadable (%v), credential missing (doctor will flag it)", e.IdentityFile, rerr)})
 			default:
-				if perr := v.Put(added.KeySecret(), keyData); perr != nil {
-					results = append(results, outcome{e.Alias, fmt.Sprintf("imported — WARNING: failed to store key in vault (%v), credential missing (doctor will flag it)", perr)})
-				} else {
-					results = append(results, outcome{e.Alias, "imported (key stored in vault)"})
+				change, err := v.SecretChangeLocked(l, added.KeySecret(), keyData, false)
+				if err != nil {
+					return fmt.Errorf("encrypting imported key: %w", err)
 				}
+				changes = append(changes, change)
+				results = append(results, outcome{e.Alias, "imported (key stored in vault)"})
 			}
 		}
 	}
 
-	if err := store.Save(); err != nil {
+	metadata, err := store.Change()
+	if err != nil {
+		return err
+	}
+	changes = append(changes, metadata)
+	if err := l.Apply(changes); err != nil {
 		return fmt.Errorf("saving profile store: %w", err)
 	}
 

@@ -234,18 +234,6 @@ Host example
 			},
 		},
 		{
-			name:    "invalid port skipped",
-			text:    "Host example\n  HostName example.com\n  Port invalid\n",
-			baseDir: "/tmp",
-			want: []Entry{
-				{
-					Alias:    "example",
-					HostName: "example.com",
-					Port:     22,
-				},
-			},
-		},
-		{
 			name:    "space or equals separator",
 			text:    "Host example1\n  HostName=ex1.com\n\nHost example2\n  HostName ex2.com\n",
 			baseDir: "/tmp",
@@ -307,11 +295,11 @@ func TestParseFile(t *testing.T) {
 		}
 
 		// Write main config with Include
-		mainContent := `Host local
+		mainContent := `Include ~/.ssh/config.d/servers
+Host local
   HostName localhost
   User testuser
 
-Include ~/.ssh/config.d/servers
 `
 		if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
 			t.Fatalf("WriteFile() error = %v", err)
