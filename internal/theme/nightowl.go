@@ -8,6 +8,7 @@ package theme
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strings"
 
@@ -100,9 +101,6 @@ func Init() {
 	// where truecolor *rendering* passes through fine and only the OSC query
 	// dies at the multiplexer. One env var restores the designed look.
 	if hint := os.Getenv("CLAVIS_BG"); len(hint) == 7 && hint[0] == '#' {
-		if hint == HexBg {
-			return
-		}
 		rebase(hint)
 		return
 	}
@@ -122,9 +120,6 @@ func Init() {
 		return
 	}
 	hex := termenv.ConvertToRGB(rgb).Hex()
-	if hex == HexBg {
-		return
-	}
 	rebase(hex)
 }
 
@@ -168,6 +163,7 @@ func ansiFallback() {
 // the bg; on light-ish backgrounds (translucent windows, pastel themes) it
 // darkens away from the bg instead.
 func rebase(bgHex string) {
+	Bg = lipgloss.Color(bgHex)
 	dark := hexLum(bgHex) < 0.5
 	if dark {
 		SelBg = lipgloss.Color(BlendHex(bgHex, HexWhite, 0.14))
@@ -182,15 +178,68 @@ func rebase(bgHex string) {
 		Faint = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.40))
 		SparkDim = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.30))
 	}
-	Hint = Hint.Foreground(Faint)
+	// Avoid a selection fill that crosses the black/white contrast boundary
+	// on mid-tone backgrounds, where neither foreground could fit both.
+	if luminance(bgHex) <= .179 && luminance(string(SelBg)) > .183 {
+		SelBg = lipgloss.Color(BlendHex(bgHex, "#000000", .1))
+	} else if luminance(bgHex) > .179 && luminance(string(SelBg)) < .175 {
+		SelBg = lipgloss.Color(BlendHex(bgHex, "#ffffff", .1))
+	}
+	// Essential text must work on both the canvas and selected rows. Keep
+	// the hue where possible, moving only as far as needed toward black/white.
+	fit := func(c string) lipgloss.Color { return lipgloss.Color(readable(c, bgHex, string(SelBg))) }
+	Fg, Subtle, Muted = fit(HexFg), fit(string(Subtle)), fit(string(Muted))
+	Red, Green, Yellow = fit(HexRed), fit(HexGreen), fit(HexYellow)
+	Blue, Magenta, Cyan = fit(HexBlue), fit(HexMagenta), fit(HexCyan)
+	BrYellow, BrCyan, White = fit(HexBrYellow), fit(HexBrCyan), fit(HexWhite)
+	Title = Title.Foreground(BrCyan)
+	Value = Value.Foreground(Fg)
+	Label, Tag = Label.Foreground(Blue), Tag.Foreground(Blue)
+	Accent, SelTick = Accent.Foreground(BrCyan), SelTick.Foreground(BrCyan)
+	StatusOK, StatusWarn, StatusErr = StatusOK.Foreground(Green), StatusWarn.Foreground(BrYellow), StatusErr.Foreground(Red)
+	Hint = Hint.Foreground(Muted)
 	Sub = Sub.Foreground(Subtle)
 	Dim = Dim.Foreground(Muted)
 	Chip = Chip.Foreground(Muted)
 	Spark = Spark.Foreground(SparkDim)
 	Panel = Panel.BorderForeground(Faint)
 	// Chips cut their text out of the declared background, whatever it is.
-	ChipAccent = ChipAccent.Foreground(lipgloss.Color(bgHex))
-	ChipWarn = ChipWarn.Foreground(lipgloss.Color(bgHex))
+	ChipAccent = ChipAccent.Foreground(lipgloss.Color(readable(bgHex, string(BrCyan), string(BrCyan)))).Background(BrCyan)
+	ChipWarn = ChipWarn.Foreground(lipgloss.Color(readable(bgHex, string(BrYellow), string(BrYellow)))).Background(BrYellow)
+}
+
+func init() { rebase(HexBg) }
+
+func readable(c, bg, selected string) string {
+	contrast := func(a, b string) float64 {
+		x, y := luminance(a), luminance(b)
+		return (math.Max(x, y) + .05) / (math.Min(x, y) + .05)
+	}
+	score := func(c string) float64 { return math.Min(contrast(c, bg), contrast(c, selected)) }
+	toward := "#ffffff"
+	if score("#000000") > score(toward) {
+		toward = "#000000"
+	}
+	for i := 0; i <= 100; i++ {
+		candidate := BlendHex(c, toward, float64(i)/100)
+		if score(candidate) >= 4.5 {
+			return candidate
+		}
+	}
+	return toward
+}
+
+func luminance(h string) float64 {
+	var r, g, b int
+	fmt.Sscanf(h, "#%02x%02x%02x", &r, &g, &b)
+	linear := func(n int) float64 {
+		v := float64(n) / 255
+		if v <= .04045 {
+			return v / 12.92
+		}
+		return math.Pow((v+.055)/1.055, 2.4)
+	}
+	return .2126*linear(r) + .7152*linear(g) + .0722*linear(b)
 }
 
 // hexLum is the perceived luminance of a #rrggbb colour, 0 (black) to 1.
