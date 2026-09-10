@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/armtch-dev/clavis/internal/fstxn"
 	"github.com/armtch-dev/clavis/internal/profile"
 )
 
@@ -66,16 +67,27 @@ func normTags(tags []string) []string {
 }
 
 type Store struct {
-	Path    string
-	Version int      `json:"version"`
-	Scripts []Script `json:"scripts"`
+	revision fstxn.Revision
+	Path     string   `json:"-"`
+	Version  int      `json:"version"`
+	Scripts  []Script `json:"scripts"`
 }
 
 func LoadStore(configDir string) (*Store, error) {
-	s := &Store{Path: filepath.Join(configDir, "scripts.json"), Version: storeVersion}
-	raw, err := os.ReadFile(s.Path)
+	l, err := fstxn.Acquire(configDir)
+	if err != nil {
+		return nil, err
+	}
+	defer l.Close()
+	return LoadStoreLocked(l)
+}
+
+func LoadStoreLocked(l *fstxn.Lock) (*Store, error) {
+	s := &Store{Path: filepath.Join(l.Dir(), "scripts.json")}
+	raw, err := l.ReadFile("scripts.json")
 	if err != nil {
 		if os.IsNotExist(err) {
+			s.Version = storeVersion
 			return s, nil
 		}
 		return nil, err
@@ -83,25 +95,75 @@ func LoadStore(configDir string) (*Store, error) {
 	if err := json.Unmarshal(raw, s); err != nil {
 		return nil, fmt.Errorf("scripts.json is corrupt: %w", err)
 	}
+	if err := s.validate(); err != nil {
+		return nil, err
+	}
+	s.revision = fstxn.RevisionOf(raw)
 	return s, nil
 }
 
+func (s *Store) validate() error {
+	if s.Version != storeVersion {
+		return fmt.Errorf("unsupported scripts.json version %d", s.Version)
+	}
+	ids, names := map[string]bool{}, map[string]bool{}
+	for i := range s.Scripts {
+		sc := &s.Scripts[i]
+		if err := profile.ValidateID(sc.ID); err != nil {
+			return err
+		}
+		if err := Validate(sc); err != nil {
+			return fmt.Errorf("script %s: %w", sc.ID, err)
+		}
+		name := strings.ToLower(sc.Name)
+		id := strings.ToLower(sc.ID)
+		if ids[id] || names[name] {
+			return fmt.Errorf("duplicate script ID/name %q", sc.ID)
+		}
+		ids[id], names[name] = true, true
+	}
+	return nil
+}
+
 func (s *Store) Save() error {
+	l, err := fstxn.Acquire(filepath.Dir(s.Path))
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	return s.SaveLocked(l)
+}
+
+func (s *Store) CheckCurrentLocked(l *fstxn.Lock) error { return s.revision.Check(l, "scripts.json") }
+
+func (s *Store) SaveLocked(l *fstxn.Lock) error {
+	if err := s.CheckCurrentLocked(l); err != nil {
+		return err
+	}
+	c, err := s.Change()
+	if err != nil {
+		return err
+	}
+	if err := l.Apply([]fstxn.Change{c}); err != nil {
+		return err
+	}
+	s.revision = fstxn.RevisionOf(c.Data)
+	return nil
+}
+
+// Change returns metadata for a caller-owned transaction, without locking/writing.
+func (s *Store) Change() (fstxn.Change, error) {
+	if err := s.validate(); err != nil {
+		return fstxn.Change{}, err
+	}
 	sort.Slice(s.Scripts, func(i, j int) bool {
 		return strings.ToLower(s.Scripts[i].Name) < strings.ToLower(s.Scripts[j].Name)
 	})
 	raw, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
-		return err
+		return fstxn.Change{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
-		return err
-	}
-	tmp := s.Path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.Path)
+	return fstxn.Change{Path: "scripts.json", Data: raw}, nil
 }
 
 func (s *Store) ByID(id string) *Script {
@@ -129,6 +191,11 @@ func (s *Store) Add(sc Script) (*Script, error) {
 	if err := Validate(&sc); err != nil {
 		return nil, err
 	}
+	for _, other := range s.Scripts {
+		if strings.EqualFold(other.ID, sc.ID) {
+			return nil, fmt.Errorf("duplicate script ID %q", sc.ID)
+		}
+	}
 	if s.ByName(sc.Name) != nil {
 		return nil, fmt.Errorf("a script named %q already exists", sc.Name)
 	}
@@ -145,6 +212,11 @@ func (s *Store) Update(sc Script) error {
 	}
 	if err := Validate(&sc); err != nil {
 		return err
+	}
+	for i := range s.Scripts {
+		if &s.Scripts[i] != cur && strings.EqualFold(s.Scripts[i].ID, sc.ID) {
+			return fmt.Errorf("duplicate script ID %q", sc.ID)
+		}
 	}
 	if other := s.ByName(sc.Name); other != nil && other.ID != sc.ID {
 		return fmt.Errorf("a script named %q already exists", sc.Name)
@@ -166,6 +238,11 @@ func (s *Store) Remove(id string) error {
 }
 
 func Validate(sc *Script) error {
+	if sc.ID != "" {
+		if err := profile.ValidateID(sc.ID); err != nil {
+			return err
+		}
+	}
 	sc.Name = strings.TrimSpace(sc.Name)
 	sc.Tags = normTags(sc.Tags)
 	if sc.Name == "" {

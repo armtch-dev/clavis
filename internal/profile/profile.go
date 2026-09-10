@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/armtch-dev/clavis/internal/fstxn"
 )
 
 const storeVersion = 1
@@ -73,16 +75,28 @@ func (p *Profile) HasAuth(k AuthKind) bool {
 func (p *Profile) Addr() string { return net.JoinHostPort(p.Host, fmt.Sprintf("%d", p.Port)) }
 
 type Store struct {
-	Path     string
+	revision fstxn.Revision
+	Path     string    `json:"-"`
 	Version  int       `json:"version"`
 	Profiles []Profile `json:"profiles"`
 }
 
 func LoadStore(configDir string) (*Store, error) {
-	s := &Store{Path: filepath.Join(configDir, "profiles.json"), Version: storeVersion}
-	raw, err := os.ReadFile(s.Path)
+	l, err := fstxn.Acquire(configDir)
+	if err != nil {
+		return nil, err
+	}
+	defer l.Close()
+	return LoadStoreLocked(l)
+}
+
+// LoadStoreLocked reads under caller-owned config-directory coordination.
+func LoadStoreLocked(l *fstxn.Lock) (*Store, error) {
+	s := &Store{Path: filepath.Join(l.Dir(), "profiles.json")}
+	raw, err := l.ReadFile("profiles.json")
 	if err != nil {
 		if os.IsNotExist(err) {
+			s.Version = storeVersion
 			return s, nil
 		}
 		return nil, err
@@ -90,25 +104,77 @@ func LoadStore(configDir string) (*Store, error) {
 	if err := json.Unmarshal(raw, s); err != nil {
 		return nil, fmt.Errorf("profiles.json is corrupt: %w", err)
 	}
+	if err := s.validate(); err != nil {
+		return nil, err
+	}
+	s.revision = fstxn.RevisionOf(raw)
 	return s, nil
 }
 
+// Shared by loading and serialization so a saved store is always loadable.
+func (s *Store) validate() error {
+	if s.Version != storeVersion {
+		return fmt.Errorf("unsupported profiles.json version %d", s.Version)
+	}
+	ids, names := map[string]bool{}, map[string]bool{}
+	for i := range s.Profiles {
+		p := &s.Profiles[i]
+		if err := ValidateID(p.ID); err != nil {
+			return err
+		}
+		if err := Validate(p); err != nil {
+			return fmt.Errorf("profile %s: %w", p.ID, err)
+		}
+		name := strings.ToLower(p.Name)
+		id := strings.ToLower(p.ID)
+		if ids[id] || names[name] {
+			return fmt.Errorf("duplicate profile ID/name %q", p.ID)
+		}
+		ids[id], names[name] = true, true
+	}
+	return nil
+}
+
 func (s *Store) Save() error {
+	l, err := fstxn.Acquire(filepath.Dir(s.Path))
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	return s.SaveLocked(l)
+}
+
+func (s *Store) CheckCurrentLocked(l *fstxn.Lock) error { return s.revision.Check(l, "profiles.json") }
+
+func (s *Store) SaveLocked(l *fstxn.Lock) error {
+	if err := s.CheckCurrentLocked(l); err != nil {
+		return err
+	}
+	c, err := s.Change()
+	if err != nil {
+		return err
+	}
+	if err := l.Apply([]fstxn.Change{c}); err != nil {
+		return err
+	}
+	s.revision = fstxn.RevisionOf(c.Data)
+	return nil
+}
+
+// Change serializes metadata for a caller-owned metadata+secret transaction.
+// It does not acquire a lock or write to disk. Publish drafts only after Apply.
+func (s *Store) Change() (fstxn.Change, error) {
+	if err := s.validate(); err != nil {
+		return fstxn.Change{}, err
+	}
 	sort.Slice(s.Profiles, func(i, j int) bool {
 		return strings.ToLower(s.Profiles[i].Name) < strings.ToLower(s.Profiles[j].Name)
 	})
 	raw, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
-		return err
+		return fstxn.Change{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
-		return err
-	}
-	tmp := s.Path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.Path)
+	return fstxn.Change{Path: "profiles.json", Data: raw}, nil
 }
 
 func (s *Store) ByID(id string) *Profile {
@@ -138,6 +204,11 @@ func (s *Store) Add(p Profile) (*Profile, error) {
 	if err := Validate(&p); err != nil {
 		return nil, err
 	}
+	for _, other := range s.Profiles {
+		if strings.EqualFold(other.ID, p.ID) {
+			return nil, fmt.Errorf("duplicate profile ID %q", p.ID)
+		}
+	}
 	if s.ByName(p.Name) != nil {
 		return nil, fmt.Errorf("a profile named %q already exists", p.Name)
 	}
@@ -154,6 +225,11 @@ func (s *Store) Update(p Profile) error {
 	}
 	if err := Validate(&p); err != nil {
 		return err
+	}
+	for i := range s.Profiles {
+		if &s.Profiles[i] != cur && strings.EqualFold(s.Profiles[i].ID, p.ID) {
+			return fmt.Errorf("duplicate profile ID %q", p.ID)
+		}
 	}
 	if other := s.ByName(p.Name); other != nil && other.ID != p.ID {
 		return fmt.Errorf("a profile named %q already exists", p.Name)
@@ -184,11 +260,25 @@ var (
 )
 
 func Validate(p *Profile) error {
+	// Drafts may omit ID; Add generates it and store serialization requires it.
+	if p.ID != "" {
+		if err := ValidateID(p.ID); err != nil {
+			return err
+		}
+	}
+	if p.IdentityID != "" {
+		if err := ValidateID(p.IdentityID); err != nil {
+			return err
+		}
+	}
+	if err := validateAuth(p.Auth); err != nil {
+		return err
+	}
 	p.Name = strings.TrimSpace(p.Name)
 	p.Host = strings.TrimSpace(p.Host)
 	p.User = strings.TrimSpace(p.User)
-	if p.Name == "" || !nameRe.MatchString(p.Name) {
-		return errors.New("name must start with a letter/number (letters, numbers, spaces, . _ -)")
+	if err := ValidateName(p.Name); err != nil {
+		return err
 	}
 	if err := ValidateHost(p.Host); err != nil {
 		return err
@@ -201,8 +291,8 @@ func Validate(p *Profile) error {
 	}
 	// An identity-backed profile takes user + auth from the identity.
 	if p.IdentityID == "" {
-		if p.User == "" || !userRe.MatchString(p.User) {
-			return errors.New("user looks invalid")
+		if err := ValidateUser(p.User); err != nil {
+			return err
 		}
 		if len(p.Auth) == 0 {
 			return errors.New("profile needs at least one auth method (password or key)")
@@ -212,6 +302,42 @@ func Validate(p *Profile) error {
 		if err := ValidateProxyJump(p.ProxyJump); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// ValidateName and ValidateUser also serve field-level editor validation.
+func ValidateName(name string) error {
+	if name == "" || !nameRe.MatchString(name) {
+		return errors.New("name must start with a letter/number (letters, numbers, spaces, . _ -)")
+	}
+	return nil
+}
+
+func ValidateUser(user string) error {
+	if user == "" || !userRe.MatchString(user) {
+		return errors.New("user looks invalid")
+	}
+	return nil
+}
+
+// ValidateID accepts the existing secret-prefix format, including legacy IDs.
+func ValidateID(id string) error {
+	if id == "" || strings.Contains(id, "..") || !idRe.MatchString(id) {
+		return fmt.Errorf("invalid metadata ID %q", id)
+	}
+	return nil
+}
+
+var idRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
+func validateAuth(auth []AuthKind) error {
+	seen := map[AuthKind]bool{}
+	for _, a := range auth {
+		if (a != AuthPassword && a != AuthKey) || seen[a] {
+			return fmt.Errorf("invalid or duplicate auth method %q", a)
+		}
+		seen[a] = true
 	}
 	return nil
 }

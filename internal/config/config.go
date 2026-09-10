@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/armtch-dev/clavis/internal/fstxn"
 	"github.com/armtch-dev/clavis/internal/gitsync"
 )
 
@@ -14,7 +15,8 @@ import (
 // keychain cache, the GitHub token, security-key enrollment) deliberately
 // lives elsewhere — config.json travels through git to other machines.
 type Config struct {
-	Sync gitsync.Settings `json:"sync"`
+	Sync     gitsync.Settings `json:"sync"`
+	revision fstxn.Revision
 }
 
 // Dir returns the config directory: $CLAVIS_CONFIG_DIR, else ~/.config/clavis.
@@ -30,8 +32,17 @@ func Dir() (string, error) {
 }
 
 func Load(dir string) (*Config, error) {
+	l, err := fstxn.Acquire(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer l.Close()
+	return LoadLocked(l)
+}
+
+func LoadLocked(l *fstxn.Lock) (*Config, error) {
 	c := &Config{}
-	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	raw, err := l.ReadFile("config.json")
 	if err != nil {
 		if os.IsNotExist(err) {
 			return c, nil
@@ -41,21 +52,40 @@ func Load(dir string) (*Config, error) {
 	if err := json.Unmarshal(raw, c); err != nil {
 		return nil, err
 	}
+	c.revision = fstxn.RevisionOf(raw)
 	return c, nil
 }
 
 func (c *Config) Save(dir string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	raw, err := json.MarshalIndent(c, "", "  ")
+	l, err := fstxn.Acquire(dir)
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, "config.json")
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	defer l.Close()
+	return c.SaveLocked(l)
+}
+
+func (c *Config) CheckCurrentLocked(l *fstxn.Lock) error { return c.revision.Check(l, "config.json") }
+
+func (c *Config) SaveLocked(l *fstxn.Lock) error {
+	if err := c.CheckCurrentLocked(l); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	change, err := c.Change()
+	if err != nil {
+		return err
+	}
+	if err := l.Apply([]fstxn.Change{change}); err != nil {
+		return err
+	}
+	c.revision = fstxn.RevisionOf(change.Data)
+	return nil
+}
+
+func (c *Config) Change() (fstxn.Change, error) {
+	raw, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return fstxn.Change{}, err
+	}
+	return fstxn.Change{Path: "config.json", Data: raw}, nil
 }
