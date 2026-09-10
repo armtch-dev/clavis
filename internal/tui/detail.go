@@ -95,6 +95,7 @@ func (m *Model) detailLines(p *profile.Profile, cw int, t detailTier) []string {
 		auth = append(auth, "none")
 	}
 	lines = append(lines, label("auth")+theme.Value.Render(strings.Join(auth, "  ")))
+	lines = append(lines, theme.Value.Render("Credentials: "+m.authReadiness(*p)))
 	if p.IdentityID != "" {
 		name := "(deleted)"
 		if id := m.idents.ByID(p.IdentityID); id != nil {
@@ -115,6 +116,9 @@ func (m *Model) detailLines(p *profile.Profile, cw int, t detailTier) []string {
 	// health
 	section("health")
 	lines = append(lines, label("ping")+pingSpread(st, have, cw))
+	if !st.CheckedAt.IsZero() {
+		lines = append(lines, theme.Dim.Render("checked "+relDur(time.Since(st.CheckedAt))+" ago"))
+	}
 	if t.chart {
 		lines = append(lines, latencyChart(st.History, cw)...)
 	}
@@ -132,7 +136,7 @@ func (m *Model) detailLines(p *profile.Profile, cw int, t detailTier) []string {
 		section("security")
 		lines = append(lines, fingerprintLines(p.HostKeyFP, cw, t.fpWrap, label)...)
 	}
-	return lines
+	return append(lines, theme.Hint.Render("v full details / copy / chart scale"))
 }
 
 // statusBadge renders the reachability state as a bold coloured badge line:
@@ -222,7 +226,7 @@ func latencyChart(hist []float64, w int) []string {
 	for _, v := range hist {
 		if v < 0 {
 			top.WriteString(" ")
-			bot.WriteString(sparkFail.Render("╳"))
+			bot.WriteString(theme.StatusErr.Render("╳"))
 			continue
 		}
 		level := 0 // 0 .. 2n-1 across both rows
@@ -238,7 +242,7 @@ func latencyChart(hist []float64, w int) []string {
 			bot.WriteString(fg.Render(string(chartBlocks[n-1])))
 		}
 	}
-	return []string{top.String(), bot.String()}
+	return []string{top.String(), bot.String(), theme.Hint.Render(fmt.Sprintf("0–%.0f ms · samples", maxV))}
 }
 
 // fingerprintLines renders the pinned host-key fingerprint in full, wrapped

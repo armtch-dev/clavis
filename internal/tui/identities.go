@@ -151,7 +151,7 @@ func (m *Model) updateIdentities(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) viewIdentities(width, height int) string {
 	s := m.identsUI
-	inner := clamp(width-6, 44, 76)
+	inner := panelWidth(width, 76)
 	cw := inner - 6
 	list := m.idents.Identities
 
@@ -163,7 +163,7 @@ func (m *Model) viewIdentities(width, height int) string {
 		b.WriteString(theme.Hint.Render("No identities yet. Press ") + theme.Key("n") +
 			theme.Hint.Render(" to create one — profiles can then pick it in the wizard.") + "\n")
 	}
-	maxRows := clamp(height-12, 3, 14)
+	maxRows := clamp(height-10, 1, 14)
 	start := 0
 	if s.cursor >= maxRows {
 		start = s.cursor - maxRows + 1
@@ -202,5 +202,5 @@ func (m *Model) viewIdentities(width, height int) string {
 	b.WriteString(fitHints(cw,
 		[][2]string{{"enter", "edit"}, {"n", "new"}, {"d", "delete"}, {"esc", "back"}},
 		[][2]string{{"enter", "edit"}, {"n", "new"}, {"d", "del"}, {"esc", "back"}}))
-	return center(theme.Panel.Width(inner).Render(b.String()), width, height)
+	return panelView(b.String(), width, height, inner, m.panelScroll)
 }

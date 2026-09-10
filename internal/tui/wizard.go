@@ -339,6 +339,49 @@ func (m *Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if w.fieldPick {
+		seq := w.sequence()
+		switch key.String() {
+		case "esc", "ctrl+f":
+			w.fieldPick = false
+		case "up", "k", "shift+tab":
+			w.fieldIdx = max(0, w.fieldIdx-1)
+		case "down", "j", "tab":
+			w.fieldIdx = min(len(seq)-1, w.fieldIdx+1)
+		case "home":
+			w.fieldIdx = 0
+		case "end":
+			w.fieldIdx = len(seq) - 1
+		case "enter":
+			w.fieldPick = false
+			w.setStep(seq[w.fieldIdx])
+		}
+		return m, nil
+	}
+	if key.String() == "ctrl+f" && w.editing {
+		if err := w.commitStep(); err != nil {
+			w.errs = err.Error()
+			return m, nil
+		}
+		w.fieldPick, w.fieldIdx = true, 0
+		for i, s := range w.sequence() {
+			if s == w.step {
+				w.fieldIdx = i
+			}
+		}
+		return m, nil
+	}
+	if key.Type == tea.KeyShiftTab {
+		if err := w.commitStep(); err != nil {
+			w.errs = err.Error()
+			return m, nil
+		}
+		w.setStep(w.prev(w.step))
+		return m, nil
+	}
+	if key.Type == tea.KeyTab && w.step != stepKeyPaste {
+		key = tea.KeyMsg{Type: tea.KeyEnter}
+	}
 	if key.Type == tea.KeyCtrlS && w.step == stepTest {
 		if w.ident != nil {
 			return w.saveIdentity(m)
@@ -851,11 +894,20 @@ func (w *wizardModel) saveIdentity(m *Model) (tea.Model, tea.Cmd) {
 // --- view ---
 
 func (w *wizardModel) view(width, height int) string {
-	inner := min(width-6, 72)
-	if inner < 30 {
-		inner = 30
-	}
+	inner := panelWidth(width, 72)
 	dw := inner - 6 // content width inside the panel's horizontal padding
+	if w.fieldPick {
+		var rows []string
+		rows = append(rows, "Jump to field · enter choose · esc back")
+		for i, s := range w.sequence() {
+			lead := "  "
+			if i == w.fieldIdx {
+				lead = "▎ "
+			}
+			rows = append(rows, lead+stepTitles[s])
+		}
+		return panelView(strings.Join(rows, "\n"), width, height, inner, w.app.panelScroll)
+	}
 
 	title := "New profile"
 	switch {
@@ -878,7 +930,9 @@ func (w *wizardModel) view(width, height int) string {
 
 	var b strings.Builder
 	b.WriteString(theme.Title.Render(title) + "\n")
-	b.WriteString(w.progress(inner) + "\n\n")
+	if height >= 14 {
+		b.WriteString(ansi.Truncate(w.progress(inner), dw, "") + "\n\n")
+	}
 	b.WriteString(theme.Label.Render(stepIcon(w.step)+stepTitle) + "\n\n")
 
 	switch w.step {
@@ -917,9 +971,27 @@ func (w *wizardModel) view(width, height int) string {
 	}
 	b.WriteString("\n\n" + theme.Divider(dw))
 	// Clip, don't wrap: a wrapped footer breaks the panel's height budget.
-	b.WriteString("\n" + ansi.Truncate(w.footer(), dw, "…"))
+	b.WriteString("\n" + w.footer())
+	if height < 10 && w.step != stepIdentity {
+		content := w.input.View()
+		switch w.step {
+		case stepKeyPaste:
+			content = w.area.View()
+		case stepUsePassword, stepUseKey:
+			content = "y yes · n no · enter keep"
+		case stepKeySource:
+			content = "p paste · f file · k keep"
+		case stepTest:
+			content = "enter save · r test · h review · b back"
+		}
+		hints := "enter next · ⇧tab back · esc cancel"
+		if w.editing {
+			hints = "^s save · ^f fields · ⇧tab back"
+		}
+		return panelView(theme.Label.Render(stepTitle)+"\n"+content+"\n"+theme.Hint.Render(hints), width, height, inner, w.app.panelScroll)
+	}
 
-	return center(theme.Panel.Width(inner).Render(b.String()), width, height)
+	return panelView(b.String(), width, height, inner, w.app.panelScroll)
 }
 
 // progress renders the applicable steps as matte dots.
@@ -1017,7 +1089,7 @@ func (w *wizardModel) footer() string {
 	var s string
 	switch w.step {
 	case stepIdentity:
-		return theme.Hint.Render("j k choose · enter select · esc back")
+		s = "j k choose · enter select · esc back"
 	case stepUsePassword, stepUseKey:
 		if w.editing {
 			s = "choose a key · enter keep current · esc back"
@@ -1031,15 +1103,16 @@ func (w *wizardModel) footer() string {
 			s = "choose a key · esc back"
 		}
 	case stepKeyPaste:
-		s = "ctrl+d save key · esc back"
+		s = "ctrl+d accept key · esc back"
 	case stepTest:
-		return "" // test screen prints its own actions
+		s = "enter/ctrl+s save · r test · h review · b back"
 	default:
 		s = "enter next · esc back"
 	}
 	if w.editing {
-		s += " · ctrl+s save now"
+		s = "ctrl+s save · ctrl+f fields\n" + s
 	}
+	s += "\nshift+tab previous · ctrl+e error details"
 	return theme.Hint.Render(s)
 }
 
@@ -1063,7 +1136,7 @@ func (w *wizardModel) viewTest() string {
 	if w.draft.ProxyJump != "" {
 		b.WriteString("\n" + theme.StatusWarn.Render("note: test dials directly; ProxyJump applies to real sessions only"))
 	}
-	b.WriteString("\n\n" + hintKeys([][2]string{{"enter", "save"}, {"r", "retest"}, {"b", "back"}}))
+	b.WriteString("\n\n" + hintKeys([][2]string{{"enter", "save"}, {"r", "retest"}, {"h", "review key"}, {"b", "back"}}))
 	return b.String()
 }
 

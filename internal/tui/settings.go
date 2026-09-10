@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"github.com/charmbracelet/x/ansi"
 	"runtime"
 	"strings"
 	"time"
@@ -132,7 +131,10 @@ func (u unlockModel) view(spin string, w, h int, scroll ...int) string {
 	}
 	b.WriteString(hintKeys(hints) + "\n")
 	b.WriteString(theme.Hint.Render("lost the key?  clavis vault reset"))
-	return center(theme.Panel.Width(pw).Render(b.String()), w, h)
+	if h < 10 {
+		return panelView("Unlock vault\n"+u.input.View()+"\nenter unlock · tab security key\nesc browse · ctrl+e error", w, h, pw, scrollOffset(scroll))
+	}
+	return panelView(b.String(), w, h, pw, scrollOffset(scroll))
 }
 
 // --- first-run key banner ---
@@ -196,7 +198,7 @@ func (k keyBannerModel) view(w, h int, scroll ...int) string {
 		b.WriteString(hintKeys(hints) + "\n")
 	}
 	b.WriteString(hintKeys([][2]string{{"enter", "I stored it safely — continue"}}))
-	return center(theme.Panel.Width(pw).Render(b.String()), w, h)
+	return panelView(b.String(), w, h, pw, scrollOffset(scroll))
 }
 
 // --- settings screen ---
@@ -515,10 +517,7 @@ func (s *settingsModel) saveToken(m *Model) (tea.Model, tea.Cmd) {
 }
 
 func (s *settingsModel) view(w, h int) string {
-	inner := min(w-6, 70)
-	if inner < 34 {
-		inner = 34
-	}
+	inner := panelWidth(w, 70)
 	dw := inner - 6
 	var b strings.Builder
 	b.WriteString(theme.Title.Render(theme.IconGear+" Settings") + theme.Dim.Render("   sync & unlock") + "\n\n")
@@ -539,9 +538,11 @@ func (s *settingsModel) view(w, h int) string {
 		b.WriteString(hintKeys([][2]string{{"y", "create + push"}, {"esc", "cancel"}}) + "\n")
 	default:
 		row := func(k, label, val string) {
-			line := "  " + theme.Accent.Render(k) + "  " +
-				theme.Label.Width(30).Render(label) + theme.Value.Render(val)
-			b.WriteString(ansi.Truncate(line, dw, "…") + "\n")
+			line := theme.Accent.Render(k) + " " + theme.Label.Render(label)
+			if val != "" {
+				line += "\n  " + theme.Value.Render(val)
+			}
+			b.WriteString(line + "\n")
 		}
 		cfg := s.app.cfg
 		tok := theme.Dim.Render("not set")
@@ -564,6 +565,12 @@ func (s *settingsModel) view(w, h int) string {
 		}
 		row("f", "security-key unlock (FIDO2)", onOff(s.fidoSet))
 		row("s", "sync now", "")
+		row("r", "refresh local unlock status", "")
+		row("v", "full sync details", "")
+		if !s.snapshotReady {
+			b.WriteString(theme.Hint.Render("loading local status…") + "\n")
+		}
+		b.WriteString(s.app.syncDetails() + "\n")
 	}
 	if s.errs != "" {
 		b.WriteString("\n" + theme.StatusErr.Render("✗ "+s.errs) + "\n")
@@ -572,7 +579,7 @@ func (s *settingsModel) view(w, h int) string {
 		b.WriteString("\n" + s.app.spin.View() + theme.Accent.Render(" "+s.busy) + "\n")
 	}
 	b.WriteString("\n" + theme.Divider(dw) + "\n" + theme.Hint.Render("esc back"))
-	return center(theme.Panel.Width(inner).Render(b.String()), w, h)
+	return panelView(b.String(), w, h, inner, s.app.panelScroll)
 }
 
 func onOff(v bool) string {

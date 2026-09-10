@@ -372,7 +372,7 @@ func (s *scriptsModel) view(width, height int) string {
 }
 
 func (s *scriptsModel) viewPicker(width, height int) string {
-	inner := clamp(width-6, 44, 76)
+	inner := panelWidth(width, 76)
 	cw := inner - 6
 	list := s.applicable()
 	hidden := len(s.app.scripts.Scripts) - len(list)
@@ -408,7 +408,7 @@ func (s *scriptsModel) viewPicker(width, height int) string {
 				theme.Hint.Render(" to write or paste one.") + "\n")
 		}
 	}
-	maxRows := clamp(height-12, 3, 12)
+	maxRows := clamp(height-10, 1, 12)
 	start := 0
 	if s.cursor >= maxRows {
 		start = s.cursor - maxRows + 1
@@ -456,11 +456,11 @@ func (s *scriptsModel) viewPicker(width, height int) string {
 			[][2]string{{"enter", "run"}, {"n", "paste & run"}, {"esc", "back"}},
 			[][2]string{{"enter", "run"}, {"n", "paste"}, {"esc", "back"}}))
 	}
-	return center(theme.Panel.Width(inner).Render(b.String()), width, height)
+	return panelView(b.String(), width, height, inner, s.app.panelScroll)
 }
 
 func (s *scriptsModel) viewEditor(width, height int) string {
-	inner := clamp(width-6, 44, 80)
+	inner := panelWidth(width, 80)
 	cw := inner - 6
 
 	title := "New script"
@@ -472,11 +472,20 @@ func (s *scriptsModel) viewEditor(width, height int) string {
 	// panel border+padding) total 16, plus 2 when the error line is showing.
 	// Sizing here rather than in openEditor keeps the panel correct when the
 	// footer grows a status line mid-edit.
-	overhead := 16
-	if s.errs != "" {
-		overhead += 2
+	if height < 26 || width < 60 {
+		label, field := "script", s.area.View()
+		if s.focus == focusName {
+			label, field = "name", s.name.View()
+		}
+		if s.focus == focusTags {
+			label, field = "tags", s.tags.View()
+		}
+		head := title + " · " + label
+		if !s.manage() {
+			head += " · on " + s.profileName
+		}
+		return panelView(theme.Title.Render(truncTo(head, cw))+"\n"+field+"\n"+theme.Hint.Render("^s save · tab/⇧tab field · esc keep"), width, height, inner, s.app.panelScroll)
 	}
-	s.area.SetHeight(clamp(height-overhead, 3, 14))
 
 	var b strings.Builder
 	// Composed lines clip rather than wrap — a wrap inside the panel breaks
@@ -497,14 +506,15 @@ func (s *scriptsModel) viewEditor(width, height int) string {
 	b.WriteString("\n\n" + theme.Divider(cw) + "\n")
 	if s.manage() {
 		b.WriteString(fitHints(cw,
-			[][2]string{{"ctrl+d", "save"}, {"tab", "next field"}, {"esc", "back"}},
-			[][2]string{{"^d", "save"}, {"tab", "next"}, {"esc", "back"}}))
+			[][2]string{{"ctrl+s", "save"}, {"tab/⇧tab", "field"}, {"esc", "keep draft"}},
+			[][2]string{{"^s", "save"}, {"tab", "field"}, {"esc", "keep"}}))
 	} else {
 		b.WriteString(fitHints(cw,
-			[][2]string{{"ctrl+r", "run without saving"}, {"ctrl+d", "save"}, {"tab", "next field"}, {"esc", "back"}},
-			[][2]string{{"^r", "run"}, {"^d", "save"}, {"tab", "next"}, {"esc", "back"}}))
+			[][2]string{{"ctrl+r", "run without saving"}, {"ctrl+s", "save"}, {"tab/⇧tab", "field"}, {"esc", "keep draft"}},
+			[][2]string{{"^r", "run"}, {"^s", "save"}, {"tab", "field"}, {"esc", "keep"}}))
 	}
-	return center(theme.Panel.Width(inner).Render(b.String()), width, height)
+	b.WriteString("\n" + theme.Hint.Render("ctrl+n recover as new copy · ctrl+e error"))
+	return panelView(b.String(), width, height, inner, s.app.panelScroll)
 }
 
 // fitHints renders the full hint row when it fits the panel's content width,

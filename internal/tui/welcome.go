@@ -395,7 +395,7 @@ func (w *welcomeModel) view(spin string, width, h int, scroll ...int) string {
 	default:
 		b.WriteString(hintKeys([][2]string{{"enter", "continue"}, {"esc", "back"}}))
 	}
-	return center(theme.Panel.Width(pw).Render(b.String()), width, h)
+	return panelView(b.String(), width, h, pw, scrollOffset(scroll))
 }
 
 type restoreOfferMsg struct {

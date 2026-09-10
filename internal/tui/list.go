@@ -499,12 +499,11 @@ func (m *Model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (c confirmModel) view(w, h int, scroll ...int) string {
 	pw := min(46, w-2)
-	box := theme.Panel.Width(pw).Render(
-		theme.StatusErr.Render("Delete "+c.name) + "\n\n" +
-			theme.Value.Render("Its password and key will be removed from the vault.") + "\n\n" +
-			theme.Divider(pw-6) + "\n" +
-			hintKeys([][2]string{{"y", "delete"}, {"esc", "cancel"}}))
-	return center(box, w, h)
+	body := (theme.StatusErr.Render("Delete "+c.name) + "\n\n" +
+		theme.Value.Render("Its password and key will be removed from the vault.") + "\n\n" +
+		theme.Divider(pw-6) + "\n" +
+		hintKeys([][2]string{{"y", "delete"}, {"esc", "cancel"}}))
+	return panelView(body, w, h, pw, scrollOffset(scroll))
 }
 
 // --- list rendering ---
@@ -541,7 +540,7 @@ func (m *Model) layoutList() listLayout {
 		l.gap = "   "
 	}
 	l.roomy = m.height >= 22
-	l.showSpark = w >= 80
+	l.showSpark = w >= 110
 	l.showTags = w >= 96
 	l.showColHead = m.height >= 16 && w >= 70
 	if w >= 130 {
@@ -552,15 +551,14 @@ func (m *Model) layoutList() listLayout {
 		l.listW = w - l.detailW - 1 // -1 for the pane's left hairline
 	}
 	l.nameW = clamp(l.listW/5, 14, 28)
-	l.endW = clamp(l.listW/4+4, 20, 38)
+	l.endW = clamp(l.listW/2, 20, 60)
 	l.sparkW = 16
 	if l.listW >= 110 {
 		l.sparkW = 20
 	}
 	// The fixed columns must fit the row budget (rowW-1, the clip applied in
 	// renderRow) or every row gets chopped mid-auth-cell with a stray "…".
-	// Give the overflow back from the host column — the widest, and the one
-	// that truncates most gracefully.
+	// Trends yield their budget before the actual action target does.
 	gaps := 4
 	fixed := 1 + 6 + l.nameW + l.endW + 5 // dot, ping, name, host, auth
 	if l.showSpark {
@@ -568,6 +566,10 @@ func (m *Model) layoutList() listLayout {
 		fixed += l.sparkW
 	}
 	fixed += gaps * len(l.gap)
+	if fixed > max(l.listW-l.pad, 20)-1 && l.showSpark {
+		fixed -= l.sparkW + len(l.gap)
+		l.showSpark = false
+	}
 	if over := fixed - (max(l.listW-l.pad, 20) - 1); over > 0 {
 		d := min(over, l.endW-14)
 		l.endW -= d
@@ -611,6 +613,12 @@ func (m *Model) viewList() string {
 		}
 		left += theme.Dim.Render("  filter ") + theme.Value.Render(m.filter) + cursor +
 			theme.Dim.Render(fmt.Sprintf("  %d/%d", len(vis), len(m.store.Profiles)))
+	}
+	if m.catTarget != "" {
+		left = pad + theme.Label.Render("category › ") + theme.Value.Render(inputTail(m.catInput, l.width-14-l.pad)) + theme.Accent.Render("▌")
+	}
+	if m.filtering || m.filter != "" {
+		left = pad + theme.Label.Render("filter › ") + theme.Value.Render(inputTail(m.filter, l.width-12-l.pad)) + theme.Accent.Render("▌")
 	}
 	var meta []string
 	// The sort indicator lives on the ping column (colHeader); repeat it here
@@ -665,6 +673,7 @@ func (m *Model) viewList() string {
 		if m.filter != "" {
 			empty = theme.Dim.Render("Nothing matches “" + m.filter + "”.")
 		}
+		empty = ansi.Truncate(empty, max(1, l.width-2*l.pad), "…")
 		if avail > 4 {
 			b.WriteString(lipgloss.Place(l.width, avail, lipgloss.Center, lipgloss.Center, empty))
 		} else {
@@ -886,21 +895,14 @@ func trimLastRune(s string) string {
 
 // truncTo budgets terminal cells, including wide/combining graphemes.
 func truncTo(s string, w int) string {
-	if w < 2 {
-		w = 2
-	}
-	r := []rune(s)
-	if len(r) <= w {
-		return s
-	}
-	return string(r[:w-1]) + "…"
+	return ansi.Truncate(s, max(0, w), "…")
 }
 
 // midTrunc shortens s to at most w runes by eliding the middle, keeping a
 // longer head than tail (fingerprint prefixes carry the algorithm name).
 func midTrunc(s string, w int) string {
-	r := []rune(s)
-	if len(r) <= w {
+	n := ansi.StringWidth(s)
+	if n <= w {
 		return s
 	}
 	if w < 8 {
@@ -908,7 +910,7 @@ func midTrunc(s string, w int) string {
 	}
 	head := (w - 1) * 3 / 5
 	tail := w - 1 - head
-	return string(r[:head]) + "…" + string(r[len(r)-tail:])
+	return ansi.Cut(s, 0, head) + "…" + ansi.Cut(s, n-tail, n)
 }
 
 // relDur formats a duration since last contact, compact: 42s, 7m, 3h, 2d.
@@ -955,6 +957,27 @@ func (m *Model) colHeader(l listLayout) string {
 func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string {
 	p = m.effective(p) // identity-backed rows show the identity's user + auth
 	st, have := m.statuses[p.ID]
+	if l.listW < 60 {
+		state := theme.IconIdle
+		if have {
+			if st.Reachable {
+				state = theme.IconUp
+			} else {
+				state = theme.IconDown
+			}
+		}
+		if p.ProxyJump != "" {
+			state = "via jump"
+		}
+		rowW := l.listW - l.pad - 1
+		prefix := state + " " + truncTo(p.Name, 10) + " "
+		line := theme.Value.Render(prefix) + theme.Sub.Render(truncTo(p.User+"@"+p.Addr(), rowW-ansi.StringWidth(prefix)))
+		lead := strings.Repeat(" ", l.pad)
+		if selected {
+			return lead + theme.Accent.Render("▎") + selFill(line, rowW)
+		}
+		return lead + " " + line
+	}
 
 	dotColor, dot, latency := theme.Muted, theme.IconIdle, "     ·"
 	latCell := ""
@@ -974,6 +997,11 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 	}
 	if latCell == "" {
 		latCell = lipgloss.NewStyle().Foreground(dotColor).Width(6).Align(lipgloss.Right).Render(latency)
+	}
+	if p.ProxyJump != "" {
+		latCell = theme.Dim.Render("via jump")
+		dot = theme.IconIdle
+		dotColor = theme.Muted
 	}
 	cells := []string{
 		lipgloss.NewStyle().Foreground(dotColor).Render(dot),
@@ -1007,6 +1035,9 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 		auth = append(auth, theme.IconPwd)
 	}
 	cells = append(cells, theme.Chip.Width(5).Render(strings.Join(auth, " ")))
+	if strings.HasPrefix(m.authReadiness(p), "missing") {
+		cells[len(cells)-1] = theme.StatusWarn.Width(5).Render("!cred")
+	}
 
 	lead := strings.Repeat(" ", max(l.pad-1, 0))
 	rowW := max(l.listW-l.pad, 20)
@@ -1079,6 +1110,10 @@ func bgFill(line string, width int, bg lipgloss.Color) string {
 
 // spread lays out left and right on one line padded to width.
 func spread(left, right string, width int) string {
+	left = ansi.Truncate(left, max(0, width), "…")
+	if lipgloss.Width(left)+lipgloss.Width(right) >= width {
+		return ansi.Truncate(left+" "+right, width, "")
+	}
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
@@ -1142,19 +1177,26 @@ func center(s string, w, h int) string {
 }
 
 func (m *Model) viewHelp() string {
-	pw := clamp(m.width-8, 44, 68)
+	pw := panelWidth(m.width, 68)
 	dw := pw - 6
 	sections := []struct {
 		name string
 		rows [][2]string
 	}{
 		{"connect", [][2]string{
+			{"v", "full details; c copies target, f fingerprint"},
+			{"h", "review changed host key after testing"},
 			{"enter", "connect to the selected host"},
 			{"t", "test the connection (dial, handshake, auth, exec)"},
 			{"r", "run a script (only ones that apply)"},
 			{"m", "manage the script library"},
 		}},
 		{"organize", [][2]string{
+			{"ctrl+f", "editor: jump to field; ctrl+s saves"},
+			{"D", "resume retained script draft (session only)"},
+			{"X", "discard retained script draft"},
+			{"ctrl+n", "script editor: recover draft as a new copy"},
+			{"tab ⇧tab", "editor: next / previous field"},
 			{"a", "add a profile (step-by-step wizard)"},
 			{"e", "edit the selected profile"},
 			{"d", "delete the profile and its vault secrets"},
@@ -1164,6 +1206,8 @@ func (m *Model) viewHelp() string {
 			{"/", "filter profiles"},
 		}},
 		{"vault & sync", [][2]string{
+			{"ctrl+e", "full error; c copy, d dismiss"},
+			{"ctrl+r", "recover storage when blocked; then retry"},
 			{"u", "unlock the vault (when locked)"},
 			{"y", "identities — reusable credentials for many hosts"},
 			{"s", "sync now (guarded, encrypted git push)"},
@@ -1204,6 +1248,6 @@ func (m *Model) viewHelp() string {
 	b.WriteString(theme.Dim.Render("auth   ") +
 		theme.Chip.Render(theme.IconKey) + theme.Dim.Render(" key    ") +
 		theme.Chip.Render(theme.IconPwd) + theme.Dim.Render(" password") + "\n")
-	b.WriteString(theme.Hint.Render("any key to close"))
-	return theme.Panel.Width(pw).Render(b.String())
+	b.WriteString(theme.Hint.Render("pgup/pgdn scroll · esc close\nCharts: samples, not uniform time; auto-scaled per host.\nScript: ctrl+s/ctrl+d save; ctrl+r run without save.\nEscape retains one draft; D on list resumes its original target."))
+	return panelView(b.String(), m.width, m.height-m.footerHeight(), pw, m.panelScroll)
 }
