@@ -501,6 +501,9 @@ func (w *wizardModel) setBool(v bool) {
 // commitStep validates and stores the current input into the draft.
 func (w *wizardModel) commitStep() error {
 	val := strings.TrimSpace(w.input.Value())
+	if w.step == stepPassword || w.step == stepPassphrase {
+		val = w.input.Value()
+	}
 	switch w.step {
 	case stepIdentity:
 		w.reconcileIdentityPick()

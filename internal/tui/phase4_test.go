@@ -163,6 +163,50 @@ func TestPhase4RecoveryFailureAndCredentialConflictRetainEdit(t *testing.T) {
 	}
 }
 
+func TestPhase4PassphraseWhitespaceAndEarlySaveValidation(t *testing.T) {
+	m := newTestModel(t)
+	w := newWizard(m, nil)
+	m.wizard, m.screen = w, scrWizard
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(priv, "", []byte("  key phrase  "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.draft.Name, w.draft.Host, w.draft.User = "protected", "127.0.0.1", "user"
+	w.useKey = true
+	if err := w.acceptKey(pem.EncodeToMemory(block)); err != nil {
+		t.Fatal(err)
+	}
+	w.setStep(stepPassphrase)
+	w.input.SetValue("  key phrase  ")
+	m.dispatch(tea.KeyMsg{Type: tea.KeyEnter})
+	if w.passphrase != "  key phrase  " {
+		t.Fatalf("passphrase altered/rejected: %q %s", w.passphrase, w.errs)
+	}
+	w.step = stepTest
+	m.dispatch(reviewKey("s"))
+	got, err := m.vault.Get(w.draft.PassphraseSecret())
+	if err != nil || string(got) != "  key phrase  " {
+		t.Fatalf("stored phrase %q %v", got, err)
+	}
+	w = newWizard(m, nil)
+	m.wizard = w
+	m.screen = scrWizard
+	w.input.SetValue("invalid/name")
+	m.dispatch(tea.KeyMsg{Type: tea.KeyEnter})
+	if w.step != stepName || w.errs == "" {
+		t.Fatal("invalid name escaped its field without visible error")
+	}
+	w.input.SetValue("protected")
+	m.dispatch(tea.KeyMsg{Type: tea.KeyEnter})
+	if w.step != stepName || w.errs == "" {
+		t.Fatal("duplicate name escaped its field without visible error")
+	}
+}
+
 func TestPhase4QuickSaveCannotLoseProtectedKeyPassphrase(t *testing.T) {
 	m := newTestModel(t)
 	p := phase4Profile(t, m)
@@ -508,5 +552,33 @@ func TestPhase4FailedDeleteAndRebindAreAtomic(t *testing.T) {
 				t.Fatal("disk metadata changed")
 			}
 		})
+	}
+}
+
+func TestPhase4ExactPasswordAndVisibleValidationTransitions(t *testing.T) {
+	m := newTestModel(t)
+	w := newWizard(m, nil)
+	m.wizard, m.screen = w, scrWizard
+	w.usePassword = true
+	w.setStep(stepPassword)
+	w.input.SetValue("  password  ")
+	m.dispatch(tea.KeyMsg{Type: tea.KeyEnter})
+	if w.password != "  password  " {
+		t.Fatalf("secret trimmed: %q", w.password)
+	}
+	w.draft.Name, w.draft.Host, w.draft.User = "invalid/name", "127.0.0.1", "user"
+	w.step = stepTest
+	m.dispatch(reviewKey("s"))
+	if w.errs == "" || !strings.Contains(w.view(120, 30), "name") {
+		t.Fatal("validation disappeared")
+	}
+	m.settings = newSettings(m)
+	m.screen = scrSettings
+	m.settings.textStep(sToken, "token", true)
+	m.settings.token = "rejected"
+	m.settings.input.SetValue("rejected")
+	m.dispatch(tokenCheckedMsg{err: errors.New("token rejected")})
+	if m.settings.errs == "" || !strings.Contains(m.settings.view(120, 30), "token rejected") {
+		t.Fatal("token validation disappeared")
 	}
 }
