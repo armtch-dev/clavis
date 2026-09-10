@@ -1,6 +1,7 @@
 package sshx
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/armtch-dev/clavis/internal/profile"
+	"github.com/muesli/cancelreader"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
@@ -21,9 +23,8 @@ import (
 // ExternalCommand builds the system-ssh invocation for a key-auth session.
 // The decrypted key is materialized into a 0600 file inside a private 0700
 // temp dir; call cleanup (idempotent) the moment the session ends — it
-// best-effort overwrites the key bytes before unlinking. Cleanup also runs
-// on SIGINT/SIGTERM/SIGHUP so a killed clavis doesn't strand the key
-// (SIGKILL cannot be caught; documented in SECURITY.md).
+// best-effort overwrites the key bytes before unlinking. The caller owns
+// cleanup on completion/cancellation; this helper does not intercept signals.
 //
 // When the profile has a pinned host key, the session is locked to it via a
 // generated known_hosts file + StrictHostKeyChecking=yes, so the TOFU pin
@@ -34,6 +35,9 @@ import (
 // is the only place the real reason ("Permission denied", "Connection timed
 // out"…) survives to be shown in the status bar.
 func ExternalCommand(p profile.Profile, keyPEM []byte) (cmd *exec.Cmd, tail *StderrTail, cleanup func(), err error) {
+	if _, err := pinnedFingerprint(p); err != nil {
+		return nil, nil, nil, err
+	}
 	dir, err := os.MkdirTemp("", "clavis-*")
 	if err != nil {
 		return nil, nil, nil, err
@@ -44,21 +48,19 @@ func ExternalCommand(p profile.Profile, keyPEM []byte) (cmd *exec.Cmd, tail *Std
 		return nil, nil, nil, err
 	}
 
-	sig := make(chan os.Signal, 1)
+	// Process signals belong to the application. Intercepting them here can
+	// swallow quit (or re-sending can kill the app on an ordinary remote ^C).
+	// The context-owning caller performs cleanup on cancellation and completion.
+	var once sync.Once
 	cleanup = func() {
-		signal.Stop(sig)
-		if raw, err := os.ReadFile(keyPath); err == nil {
-			zero := make([]byte, len(raw))
-			os.WriteFile(keyPath, zero, 0o600)
-		}
-		os.RemoveAll(dir)
+		once.Do(func() {
+			if raw, err := os.ReadFile(keyPath); err == nil {
+				zero := make([]byte, len(raw))
+				os.WriteFile(keyPath, zero, 0o600)
+			}
+			os.RemoveAll(dir)
+		})
 	}
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	go func() {
-		if _, ok := <-sig; ok {
-			cleanup()
-		}
-	}()
 
 	args := []string{
 		"-i", keyPath,
@@ -77,7 +79,13 @@ func ExternalCommand(p profile.Profile, keyPEM []byte) (cmd *exec.Cmd, tail *Std
 		}
 		args = append(args,
 			"-o", "UserKnownHostsFile="+khPath,
-			"-o", "StrictHostKeyChecking=yes")
+			"-o", "StrictHostKeyChecking=yes",
+			"-o", "GlobalKnownHostsFile=/dev/null",
+			"-o", "KnownHostsCommand=none",
+			"-o", "NoHostAuthenticationForLocalhost=no",
+			"-o", "VerifyHostKeyDNS=no",
+			"-o", "UpdateHostKeys=no",
+			"-o", "ControlMaster=no", "-o", "ControlPath=none")
 	}
 	if p.ProxyJump != "" {
 		args = append(args, "-J", p.ProxyJump)
@@ -85,6 +93,11 @@ func ExternalCommand(p profile.Profile, keyPEM []byte) (cmd *exec.Cmd, tail *Std
 	args = append(args, fmt.Sprintf("%s@%s", p.User, p.Host))
 
 	cmd = exec.Command("ssh", args...)
+	for _, env := range os.Environ() {
+		if !strings.HasPrefix(env, "CLAVIS_") {
+			cmd.Env = append(cmd.Env, env)
+		}
+	}
 	tail = &StderrTail{}
 	cmd.Stdin, cmd.Stdout = os.Stdin, os.Stdout
 	cmd.Stderr = io.MultiWriter(os.Stderr, tail)
@@ -139,20 +152,20 @@ func knownHostsLine(p profile.Profile) string {
 // without sshpass). Returns the observed host key fingerprint and full key
 // line for TOFU pinning by the caller.
 func RunPasswordSession(p profile.Profile, password string) (hostKeyFP, hostKeyLine string, err error) {
+	return RunSessionContext(context.Background(), p, Credentials{Password: password}, 10*time.Second)
+}
+
+// RunSessionContext uses exactly the same credentials and pin callback as tests
+// and scripts. timeout bounds setup through PTY/Shell; ctx controls shell runtime.
+func RunSessionContext(ctx context.Context, p profile.Profile, creds Credentials, timeout time.Duration) (hostKeyFP, hostKeyLine string, err error) {
 	if p.ProxyJump != "" {
-		return "", "", errors.New("password auth through a ProxyJump is not supported yet — use key auth for jump-host profiles")
+		return "", "", errors.New("in-process auth through a ProxyJump is not supported — use key-only OpenSSH sessions")
 	}
-	var observed, observedLine string
-	cfg := &ssh.ClientConfig{
-		User:            p.User,
-		Auth:            []ssh.AuthMethod{ssh.Password(password)},
-		HostKeyCallback: hostKeyRecorder(p.HostKeyFP, &observed, &observedLine),
-		Timeout:         10 * time.Second,
-	}
-	client, err := ssh.Dial("tcp", p.Addr(), cfg)
+	client, conn, observed, observedLine, cleanup, err := openClient(ctx, p, creds, timeout)
 	if err != nil {
 		return observed, observedLine, err
 	}
+	defer cleanup()
 	defer client.Close()
 
 	sess, err := client.NewSession()
@@ -176,18 +189,36 @@ func RunPasswordSession(p profile.Profile, password string) (hostKeyFP, hostKeyL
 	if termType == "" {
 		termType = "xterm-256color"
 	}
-	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
-	if err := sess.RequestPty(termType, h, w, modes); err != nil {
+	// Own the input pump rather than Session.Stdin: ssh.Wait cannot interrupt
+	// an os.Stdin read when the remote closes its shell.
+	in, err := cancelreader.NewReader(os.Stdin)
+	if err != nil {
 		return observed, observedLine, err
 	}
-	sess.Stdin, sess.Stdout, sess.Stderr = os.Stdin, os.Stdout, os.Stderr
+	defer in.Close()
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		return observed, observedLine, err
+	}
+	sess.Stdout, sess.Stderr = os.Stdout, os.Stderr
+	if err := startPTY(sess, termType, h, w); err != nil {
+		return observed, observedLine, err
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return observed, observedLine, err
+	}
+	inputDone := make(chan struct{})
+	go func() { defer close(inputDone); io.Copy(stdin, in); stdin.Close() }()
+	defer func() { in.Cancel(); client.Close(); <-inputDone }()
 
 	// Track terminal resizes for the remote PTY.
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 	done := make(chan struct{})
-	defer func() { signal.Stop(winch); close(done) }()
+	watchDone := make(chan struct{})
+	defer func() { signal.Stop(winch); close(done); client.Close(); <-watchDone }()
 	go func() {
+		defer close(watchDone)
 		for {
 			select {
 			case <-winch:
@@ -200,13 +231,18 @@ func RunPasswordSession(p profile.Profile, password string) (hostKeyFP, hostKeyL
 		}
 	}()
 
-	if err := sess.Shell(); err != nil {
-		return observed, observedLine, err
-	}
 	err = sess.Wait()
 	var exitErr *ssh.ExitError
 	if errors.As(err, &exitErr) {
 		err = nil // remote shell exited non-zero; that's a normal logout, not our error
 	}
 	return observed, observedLine, err
+}
+
+func startPTY(sess *ssh.Session, termType string, h, w int) error {
+	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
+	if err := sess.RequestPty(termType, h, w, modes); err != nil {
+		return err
+	}
+	return sess.Shell()
 }
