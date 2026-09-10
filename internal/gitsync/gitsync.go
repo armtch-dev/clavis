@@ -9,8 +9,11 @@
 package gitsync
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,7 +21,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/armtch-dev/clavis/internal/vault"
@@ -38,27 +43,56 @@ type Settings struct {
 }
 
 type Client struct {
-	Dir   string // the clavis config dir == the repo worktree
-	Token string // decrypted PAT; lives only in memory
+	Dir     string          // the clavis config dir == the repo worktree
+	Token   string          // decrypted PAT; lives only in memory
+	Context context.Context // nil uses Background; each command is still bounded
 }
 
 func New(dir, token string) *Client { return &Client{Dir: dir, Token: token} }
 
-func (c *Client) git(args ...string) (string, error) {
+func (c *Client) command(args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx := c.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	full := append([]string{
 		"-c", "credential.helper=",
 		"-c", "credential.helper=" + credHelper,
 		"-c", "user.name=clavis",
 		"-c", "user.email=clavis@localhost",
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "commit.gpgsign=false",
+		"-c", "core.sshCommand=ssh -oBatchMode=yes -oConnectTimeout=10",
 	}, args...)
-	cmd := exec.Command("git", full...)
+	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = c.Dir
-	cmd.Env = append(os.Environ(), tokenEnv+"="+c.Token, "GIT_TERMINAL_PROMPT=0")
+	// Do not pass vault master keys or inherited Git overrides to helpers/hooks.
+	for _, e := range os.Environ() {
+		name, _, _ := strings.Cut(e, "=")
+		if strings.HasPrefix(name, "CLAVIS_") || strings.HasPrefix(name, "GIT_") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, e)
+	}
+	if len(args) > 0 && (args[0] == "fetch" || args[0] == "pull" || args[0] == "push") {
+		cmd.Env = append(cmd.Env, tokenEnv+"="+c.Token)
+	}
+	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0", "GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = time.Second
+	return cmd, cancel
+}
+
+func (c *Client) git(args ...string) (string, error) {
+	cmd, cancel := c.command(args...)
+	defer cancel()
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err := cmd.Run()
 	if err != nil {
-		return out.String(), fmt.Errorf("git %s: %v\n%s", strings.Join(args, " "), err, sanitize(out.String(), c.Token))
+		return out.String(), errors.New(sanitize(fmt.Sprintf("git %s: %v\n%s", strings.Join(args, " "), err, out.String()), c.Token))
 	}
 	return out.String(), nil
 }
@@ -113,10 +147,14 @@ func allowedPath(rel string) error {
 		return nil
 	}
 	if strings.HasPrefix(rel, "vault/") {
+		if filepath.Base(rel) != strings.TrimPrefix(rel, "vault/") || strings.ContainsAny(rel, "\\\n\r") {
+			return fmt.Errorf("%s: unsafe vault path", rel)
+		}
 		if !strings.HasSuffix(rel, ".age") {
 			return fmt.Errorf("%s: only .age files may live in vault/", rel)
 		}
-		return nil
+		_, err := vault.DeleteChange(strings.TrimSuffix(strings.TrimPrefix(rel, "vault/"), ".age"), false)
+		return err
 	}
 	return fmt.Errorf("%s: not on the sync allowlist", rel)
 }
@@ -140,8 +178,8 @@ func allowedFile(dir, rel string) error {
 		return fmt.Errorf("%s: %v", rel, err)
 	}
 	defer f.Close()
-	head := make([]byte, len(vault.AgeHeader))
-	if _, err := io.ReadFull(f, head); err != nil || string(head) != vault.AgeHeader {
+	head := make([]byte, len(vault.AgeHeader)+1)
+	if _, err := io.ReadFull(f, head); err != nil || string(head) != vault.AgeHeader+"\n" {
 		return fmt.Errorf("%s: not age ciphertext — refusing to sync", rel)
 	}
 	return nil
@@ -155,7 +193,23 @@ func (c *Client) guardStaged() error {
 	if err != nil {
 		return err
 	}
+	return c.guardEntries(out)
+}
+
+// The same framed object validation protects fetched trees BEFORE checkout.
+func (c *Client) guardTree(ref string) error {
+	out, err := c.git("ls-tree", "-r", "-z", "--format=%(objectmode) %(objectname) 0%x09%(path)", ref)
+	if err != nil {
+		return err
+	}
+	return c.guardEntries(out)
+}
+
+func (c *Client) guardEntries(out string) error {
 	var offenders []string
+	seen := map[string]bool{}
+	type blob struct{ oid, path string }
+	var blobs []blob
 	for _, ent := range strings.Split(out, "\x00") {
 		if strings.TrimSpace(ent) == "" {
 			continue
@@ -163,32 +217,93 @@ func (c *Client) guardStaged() error {
 		// format: <mode> <oid> <stage>\t<path>
 		tab := strings.IndexByte(ent, '\t')
 		if tab < 0 {
-			continue
+			return fmt.Errorf("malformed index entry")
 		}
 		meta, rel := strings.Fields(ent[:tab]), ent[tab+1:]
-		if len(meta) < 1 {
-			continue
+		alias := strings.ToLower(rel)
+		if seen[alias] {
+			return fmt.Errorf("%s: duplicate/case-aliased path in Git tree", rel)
+		}
+		seen[alias] = true
+		if len(meta) != 3 || meta[2] != "0" {
+			return fmt.Errorf("unmerged or malformed index entry: %s", rel)
 		}
 		if meta[0] == "120000" {
 			offenders = append(offenders, rel+": symlinks are never synced")
 			continue
+		}
+		if meta[0] != "100644" && meta[0] != "100755" {
+			return fmt.Errorf("%s: unsupported index mode %s", rel, meta[0])
 		}
 		if err := allowedPath(rel); err != nil {
 			offenders = append(offenders, err.Error())
 			continue
 		}
 		if strings.HasPrefix(filepath.ToSlash(rel), "vault/") {
-			blob, err := c.git("cat-file", "blob", ":"+rel)
-			if err != nil || !strings.HasPrefix(blob, vault.AgeHeader) {
-				offenders = append(offenders, rel+": staged content is not age ciphertext — refusing to sync")
-			}
+			blobs = append(blobs, blob{meta[1], rel})
 		}
 	}
 	if len(offenders) > 0 {
 		sort.Strings(offenders)
 		return fmt.Errorf("sync blocked, unsafe staged content:\n  %s", strings.Join(offenders, "\n  "))
 	}
-	return nil
+	if len(blobs) == 0 {
+		return nil
+	}
+	cmd, cancel := c.command("cat-file", "--batch")
+	defer cancel()
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	outPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	defer func() {
+		in.Close()
+		if cmd.ProcessState == nil {
+			cmd.Cancel()
+			cmd.Wait()
+		}
+	}()
+	r := bufio.NewReader(outPipe)
+	for _, b := range blobs {
+		if _, err := io.WriteString(in, b.oid+"\n"); err != nil {
+			return err
+		}
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		parts := strings.Fields(line)
+		if len(parts) != 3 || parts[0] != b.oid || parts[1] != "blob" {
+			return fmt.Errorf("%s: invalid batch object header", b.path)
+		}
+		size, err := strconv.ParseInt(parts[2], 10, 64)
+		header := vault.AgeHeader + "\n"
+		if err != nil || size < int64(len(header)) {
+			return fmt.Errorf("%s: staged content is not age ciphertext", b.path)
+		}
+		prefix := make([]byte, len(header))
+		if _, err := io.ReadFull(r, prefix); err != nil {
+			return err
+		}
+		if string(prefix) != header {
+			return fmt.Errorf("%s: staged content is not age ciphertext", b.path)
+		}
+		if _, err := io.CopyN(io.Discard, r, size-int64(len(header))); err != nil {
+			return err
+		}
+		if sep, err := r.ReadByte(); err != nil || sep != '\n' {
+			return fmt.Errorf("%s: invalid batch frame terminator", b.path)
+		}
+	}
+	in.Close()
+	return cmd.Wait()
 }
 
 // Guard inspects everything that would be committed (tracked + untracked,
