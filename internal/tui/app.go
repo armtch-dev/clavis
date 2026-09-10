@@ -75,13 +75,14 @@ type Model struct {
 	quiting bool
 
 	// list state
-	cursor    int
-	filter    string
-	filtering bool
-	catTarget string // profile ID being re-categorized with "c", "" when idle
-	catInput  string
-	sortMode  sortMode        // toggled with "o": in-group order (stored/latency)
-	testing   map[string]bool // profile IDs with an in-flight test
+	cursor     int
+	selectedID string // action identity; cursor is derived after ordering changes
+	filter     string
+	filtering  bool
+	catTarget  string // profile ID being re-categorized with "c", "" when idle
+	catInput   string
+	sortMode   sortMode        // toggled with "o": in-group order (stored/latency)
+	testing    map[string]bool // profile IDs with an in-flight test
 
 	// connect preflight: the profile being reachability-checked before the
 	// terminal is handed to ssh, so a dead host fails inside the TUI instead
@@ -292,6 +293,7 @@ func (m *Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case probeMsg:
 		m.statuses[msg.ProfileID] = probe.Status(msg)
+		m.clampCursor()
 		return m, waitForProbe(m.probeCh)
 
 	case testDoneMsg:

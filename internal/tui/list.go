@@ -151,6 +151,7 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	vis := m.visible()
+	m.reconcileSelection(vis)
 	switch key.String() {
 	case "q":
 		m.quiting = true
@@ -160,20 +161,26 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 		}
+		m.rememberSelection(vis)
 	case "down", "j":
 		if m.cursor < len(vis)-1 {
 			m.cursor++
 		}
+		m.rememberSelection(vis)
 	case "pgup", "ctrl+u":
 		m.cursor = max(m.cursor-10, 0)
+		m.rememberSelection(vis)
 	case "pgdown", "ctrl+d":
 		if len(vis) > 0 {
 			m.cursor = min(m.cursor+10, len(vis)-1)
 		}
+		m.rememberSelection(vis)
 	case "home":
 		m.cursor = 0
+		m.rememberSelection(vis)
 	case "end", "G":
 		m.cursor = max(len(vis)-1, 0)
+		m.rememberSelection(vis)
 	case "g":
 		m.settings = newSettings(m)
 		m.screen = scrSettings
@@ -243,16 +250,21 @@ func (m *Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) selected(vis []profile.Profile) *profile.Profile {
-	if len(vis) == 0 || m.cursor >= len(vis) {
+	if m.selectedID != "" {
+		for _, p := range vis {
+			if p.ID == m.selectedID {
+				return m.store.ByID(p.ID)
+			}
+		}
+	}
+	if len(vis) == 0 || m.cursor < 0 || m.cursor >= len(vis) {
 		return nil
 	}
 	return m.store.ByID(vis[m.cursor].ID)
 }
 
 func (m *Model) clampCursor() {
-	if n := len(m.visible()); m.cursor >= n {
-		m.cursor = max(0, n-1)
-	}
+	m.reconcileSelection(m.visible())
 }
 
 // importSSHConfig pulls non-wildcard hosts from ~/.ssh/config, storing
@@ -1051,4 +1063,23 @@ func (m *Model) viewHelp() string {
 		theme.Chip.Render(theme.IconPwd) + theme.Dim.Render(" password") + "\n")
 	b.WriteString(theme.Hint.Render("any key to close"))
 	return theme.Panel.Width(pw).Render(b.String())
+}
+
+func (m *Model) rememberSelection(vis []profile.Profile) {
+	m.selectedID = ""
+	if m.cursor >= 0 && m.cursor < len(vis) {
+		m.selectedID = vis[m.cursor].ID
+	}
+}
+
+func (m *Model) reconcileSelection(vis []profile.Profile) {
+	for i, p := range vis {
+		if p.ID == m.selectedID {
+			m.cursor = i
+			return
+		}
+	}
+	// Removed/filtered selection falls to the same row, or the preceding last row.
+	m.cursor = clamp(m.cursor, 0, max(0, len(vis)-1))
+	m.rememberSelection(vis)
 }
