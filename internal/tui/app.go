@@ -906,8 +906,14 @@ func (m *Model) View() (view string) {
 		return ""
 	}
 	defer func() {
-		view = lipgloss.NewStyle().Foreground(theme.Fg).Background(theme.Bg).
-			Width(m.width).Height(m.height).Render(view)
+		lines := strings.Split(view, "\n")
+		for len(lines) < m.height {
+			lines = append(lines, "")
+		}
+		for i, line := range lines {
+			lines[i] = bgFill(line, m.width, theme.Bg)
+		}
+		view = strings.Join(lines, "\n")
 	}()
 	// Below the floor every row wraps and the frame tears — say so instead.
 	if m.width > 0 && (m.width < 40 || m.height < 8) {

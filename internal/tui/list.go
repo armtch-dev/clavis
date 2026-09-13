@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/cellbuf"
 
 	"github.com/armtch-dev/clavis/internal/fstxn"
 	"github.com/armtch-dev/clavis/internal/profile"
@@ -1054,14 +1055,14 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 // already foreground-styled. Wrapping the joined line in a Background style
 // doesn't work: every cell's SGR reset kills the background mid-row, so only
 // the unstyled tail gets filled (the highlight visibly "tears"). Instead the
-// background sequence is re-opened after each reset, keeping the per-cell
+// background sequence is re-opened whenever SGR restores the default background, keeping the per-cell
 // colours (green dot, blue tags) on top of the fill.
 func selFill(line string, width int) string {
 	return bgFill(line, width, theme.SelBg)
 }
 
 // bgFill clips/pads line to exactly width cells and paints bg underneath,
-// re-opening the background SGR after every per-cell reset (see selFill).
+// re-opening the background SGR after full or selective resets (see selFill).
 func bgFill(line string, width int, bg lipgloss.Color) string {
 	line = ansi.Truncate(line, width, "")
 	if pad := width - lipgloss.Width(line); pad > 0 {
@@ -1076,7 +1077,27 @@ func bgFill(line string, width int, bg lipgloss.Color) string {
 	}
 	seq := marker[:i]
 	const reset = "\x1b[0m"
-	return seq + strings.ReplaceAll(line, reset, reset+seq) + reset
+	var out strings.Builder
+	out.WriteString(seq)
+	p := ansi.GetParser()
+	defer ansi.PutParser(p)
+	var state byte
+	var pen cellbuf.Style
+	for len(line) > 0 {
+		part, _, n, next := ansi.DecodeSequence(line, state, p)
+		state, line = next, line[n:]
+		out.WriteString(part)
+		if strings.HasPrefix(part, "\x1b[") && p.Command() == 'm' {
+			cellbuf.ReadStyle(p.Params(), &pen)
+			// Wrapping emits ESC[m and selective/combined resets, not only ESC[0m.
+			// Parse SGR so RGB components equal to 0 or 49 aren't mistaken for resets.
+			if pen.Bg == nil {
+				out.WriteString(seq)
+			}
+		}
+	}
+	out.WriteString(reset)
+	return out.String()
 }
 
 // spread lays out left and right on one line padded to width.

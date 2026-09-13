@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/cellbuf"
 	"github.com/muesli/termenv"
 
 	"github.com/armtch-dev/clavis/internal/probe"
@@ -27,6 +28,19 @@ func TestViewPaintsNightOwlCanvas(t *testing.T) {
 		if !strings.Contains(view, "48;2;1;22;39") {
 			t.Fatal("view missing Night Owl background")
 		}
+		const reset = "\x1b[0m"
+		const navy = "\x1b[48;2;1;22;39m"
+		for _, line := range strings.Split(view, "\n") {
+			if !strings.HasPrefix(line, navy) {
+				t.Fatal("canvas row missing navy background")
+			}
+			parts := strings.Split(strings.TrimSuffix(line, reset), reset)
+			for _, after := range parts[1:] {
+				if !strings.HasPrefix(after, navy) {
+					t.Fatal("nested style reset leaked terminal background")
+				}
+			}
+		}
 		if lipgloss.Width(view) != m.width || lipgloss.Height(view) != m.height {
 			t.Fatalf("canvas dimensions = %dx%d, want %dx%d", lipgloss.Width(view), lipgloss.Height(view), m.width, m.height)
 		}
@@ -34,6 +48,65 @@ func TestViewPaintsNightOwlCanvas(t *testing.T) {
 	m.quiting = true
 	if m.View() != "" {
 		t.Fatal("quit must leave an empty view")
+	}
+}
+
+func TestScreensHaveNoDefaultBackground(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(old)
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	m := newTestModel(t)
+	m.unlock.input = newTextInput("AGE-SECRET-KEY-…", true)
+	m.unlock.fido, m.unlock.fidoBusy = true, true
+	m.welcome = &welcomeModel{}
+	m.wizard = newWizard(m, nil)
+	m.settings = newSettings(m)
+	m.scriptsUI = newScriptsManager(m)
+	m.identsUI = &identsModel{}
+	for _, size := range [][2]int{{160, 50}, {80, 24}, {40, 8}} {
+		m.width, m.height = size[0], size[1]
+		for screen := scrList; screen <= scrIdentities+3; screen++ {
+			m.screen = screen
+			m.help = screen == scrIdentities+1
+			m.errorOpen = screen == scrIdentities+2
+			m.errorDetail = strings.Repeat("wrapped error details ", 12)
+			m.trust = nil
+			if screen == scrIdentities+3 {
+				m.trust = &trustReview{input: newTextInput("fingerprint", false)}
+			}
+			b := cellbuf.NewBuffer(m.width, m.height)
+			cellbuf.SetContent(b, m.View())
+			for y := 0; y < m.height; y++ {
+				for x := 0; x < m.width; x++ {
+					c := b.Cell(x, y)
+					if c == nil || c.Style.Bg == nil {
+						t.Fatalf("screen %d size %v: terminal background exposed at (%d, %d): %#v", screen, size, x, y, c)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestBackgroundFillHandlesSGRVariants(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(old)
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	for _, reset := range []string{"\x1b[m", "\x1b[0m", "\x1b[49m", "\x1b[0;38;2;49;0;100m", "\x1b[39;49m"} {
+		line := bgFill(selFill("a"+reset+"b", 2)+"c", 3, theme.Bg)
+		b := cellbuf.NewBuffer(3, 1)
+		cellbuf.SetContent(b, line)
+		for x, want := range []lipgloss.Color{theme.SelBg, theme.SelBg, theme.Bg} {
+			c := b.Cell(x, 0)
+			if c == nil || c.Style.Bg == nil {
+				t.Fatalf("%q: background missing at %d", reset, x)
+			}
+			r, g, blue, _ := c.Style.Bg.RGBA()
+			wr, wg, wb, _ := want.RGBA()
+			if r != wr || g != wg || blue != wb {
+				t.Fatalf("%q: cell %d background %v, want %s", reset, x, c.Style.Bg, want)
+			}
+		}
 	}
 }
 
