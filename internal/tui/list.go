@@ -522,11 +522,8 @@ type listLayout struct {
 	width, pad  int    // total width, left/right padding
 	listW       int    // width of the row region (== width unless showDetail)
 	nameW, endW int    // name and user@host column widths
-	sparkW      int    // sparkline sample count / cell width
 	detailW     int    // detail pane width (content, excl. its left border)
 	gap         string // inter-column gap, wider on large terminals
-	showSpark   bool
-	showTags    bool
 	showColHead bool
 	showDetail  bool // very wide terminal: detail side panel on the right
 	roomy       bool // tall terminal: extra blank line under the header
@@ -547,8 +544,6 @@ func (m *Model) layoutList() listLayout {
 		l.gap = "   "
 	}
 	l.roomy = m.height >= 22
-	l.showSpark = w >= 110
-	l.showTags = w >= 96
 	l.showColHead = m.height >= 16 && w >= 70
 	if w >= 130 {
 		l.showDetail = true
@@ -559,24 +554,10 @@ func (m *Model) layoutList() listLayout {
 	}
 	l.nameW = clamp(l.listW/5, 14, 28)
 	l.endW = clamp(l.listW/2, 20, 60)
-	l.sparkW = 16
-	if l.listW >= 110 {
-		l.sparkW = 20
-	}
-	// The fixed columns must fit the row budget (rowW-1, the clip applied in
-	// renderRow) or every row gets chopped mid-auth-cell with a stray "…".
-	// Trends yield their budget before the actual action target does.
-	gaps := 4
-	fixed := 1 + 6 + l.nameW + l.endW + 5 // dot, ping, name, host, auth
-	if l.showSpark {
-		gaps++
-		fixed += l.sparkW
-	}
+	// Reserve status and latency before distributing the target/name budget.
+	gaps := 3
+	fixed := 12 + 9 + l.nameW + l.endW // status, latency, name, target
 	fixed += gaps * len(l.gap)
-	if fixed > max(l.listW-l.pad, 20)-1 && l.showSpark {
-		fixed -= l.sparkW + len(l.gap)
-		l.showSpark = false
-	}
 	if over := fixed - (max(l.listW-l.pad, 20) - 1); over > 0 {
 		d := min(over, l.endW-14)
 		l.endW -= d
@@ -780,6 +761,9 @@ func (m *Model) listEntries(vis []profile.Profile) []listEntry {
 	prev := ""
 	for i, p := range vis {
 		if g := groupCategory(p); i == 0 || g != prev {
+			if i > 0 {
+				out = append(out, listEntry{idx: -1})
+			}
 			out = append(out, listEntry{heading: g})
 			prev = g
 		}
@@ -821,6 +805,10 @@ func (m *Model) renderRowRegion(vis []profile.Profile, l listLayout, avail int) 
 	first, last := -1, -1
 	for i := start; i < end; i++ {
 		e := entries[i]
+		if e.idx == -1 {
+			b.WriteString("\n")
+			continue
+		}
 		if e.heading != "" {
 			b.WriteString(m.groupHeading(e.heading, vis, l) + "\n")
 			continue
@@ -950,22 +938,12 @@ func relDur(d time.Duration) string {
 // for hairlines only.
 func (m *Model) colHeader(l listLayout) string {
 	h := theme.Dim
-	ping := "ping"
+	ping := "Latency"
 	if m.sortMode == sortLatency {
-		ping = "ping ▼" // the indicator sits on the column it sorts
+		ping = "Latency ▲"
 	}
-	cells := []string{
-		" ",
-		h.Width(6).Align(lipgloss.Right).Render(ping),
-	}
-	if l.showSpark {
-		cells = append(cells, h.Width(l.sparkW).Render("trend"))
-	}
-	cells = append(cells,
-		h.Width(l.nameW).Render("name"),
-		h.Width(l.endW).Render("host"),
-		h.Render("auth"),
-	)
+	cells := []string{h.Width(l.nameW).Render("Name"), h.Width(l.endW).Render("Target"),
+		h.Width(12).Render("Status"), h.Width(9).Align(lipgloss.Right).Render(ping)}
 	return strings.Repeat(" ", max(l.pad-1, 0)) + "  " + strings.Join(cells, l.gap)
 }
 
@@ -1018,13 +996,18 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 		dot = theme.IconIdle
 		dotColor = theme.Muted
 	}
-	cells := []string{
-		lipgloss.NewStyle().Foreground(dotColor).Render(dot),
-		latCell,
+	state := "Unchecked"
+	if have {
+		state = "Down"
+		if st.Reachable {
+			state = "Reachable"
+		}
 	}
-	if l.showSpark {
-		cells = append(cells, lipgloss.NewStyle().Width(l.sparkW).Render(sparkline(st.History, l.sparkW)))
+	if p.ProxyJump != "" {
+		state, latCell = "Via jump", theme.Dim.Render("—")
 	}
+	status := lipgloss.NewStyle().Foreground(dotColor).Width(12).Render(dot + " " + state)
+	var cells []string
 
 	// Bold on the selected name: the typographic weight reverse-video would
 	// give, on the cell the eye lands on.
@@ -1042,16 +1025,9 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 	// Subtle, not Muted: the target is real data, a step above chrome.
 	cells = append(cells, theme.Sub.Width(l.endW).Render(target))
 
-	var auth []string
-	if p.HasAuth(profile.AuthKey) {
-		auth = append(auth, theme.IconKey)
-	}
-	if p.HasAuth(profile.AuthPassword) {
-		auth = append(auth, theme.IconPwd)
-	}
-	cells = append(cells, theme.Chip.Width(5).Render(strings.Join(auth, " ")))
+	cells = append(cells, status, lipgloss.NewStyle().Width(9).Align(lipgloss.Right).Render(latCell))
 	if strings.HasPrefix(m.authReadiness(p), "missing") {
-		cells[len(cells)-1] = theme.StatusWarn.Width(5).Render("!cred")
+		cells[len(cells)-2] = theme.StatusWarn.Width(12).Render("! Credentials")
 	}
 
 	lead := strings.Repeat(" ", max(l.pad-1, 0))
@@ -1063,13 +1039,6 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 		trailing = m.spin.View() + theme.Accent.Render(" testing")
 	case m.connecting == p.ID:
 		trailing = m.spin.View() + theme.Accent.Render(" connecting")
-	case l.showTags && len(p.Tags) > 0:
-		// Tags are garnish: only append them when enough of the row budget
-		// remains for them to be legible — a clipped "#clou…" stub is noise.
-		remain := rowW - 1 - lipgloss.Width(strings.Join(cells, l.gap)) - len(l.gap)
-		if remain >= 10 {
-			trailing = theme.Tag.Render(truncTo("#"+strings.Join(p.Tags, " #"), remain))
-		}
 	}
 	if trailing != "" {
 		cells = append(cells, trailing)

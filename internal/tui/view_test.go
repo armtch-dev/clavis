@@ -126,6 +126,26 @@ func TestSelectionFillNotTorn(t *testing.T) {
 	}
 }
 
+func TestHostTableIdentityFirst(t *testing.T) {
+	m := newTestModel(t)
+	m.width, m.height = 120, 30
+	p := addPasswordProfile(t, m, "production-web")
+	l := m.layoutList()
+	header := ansi.Strip(m.colHeader(l))
+	if !(strings.Index(header, "Name") < strings.Index(header, "Target") &&
+		strings.Index(header, "Target") < strings.Index(header, "Status") &&
+		strings.Index(header, "Status") < strings.Index(header, "Latency")) {
+		t.Fatalf("column order: %s", header)
+	}
+	row := ansi.Strip(m.renderRow(*p, true, l))
+	if strings.Index(row, p.Name) > strings.Index(row, p.User+"@") || !strings.Contains(row, "Unchecked") {
+		t.Fatalf("identity or status missing: %s", row)
+	}
+	if strings.Contains(header, "auth") || strings.Contains(header, "trend") {
+		t.Fatalf("secondary details in table: %s", header)
+	}
+}
+
 // bgFill (the mechanic under the selection fill) must emit exactly `width`
 // cells — clipping over-wide input, padding short input — and re-open the
 // background after every per-cell reset.
