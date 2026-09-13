@@ -522,7 +522,7 @@ type listLayout struct {
 	width, pad  int    // total width, left/right padding
 	listW       int    // width of the row region (== width unless showDetail)
 	nameW, endW int    // name and user@host column widths
-	detailW     int    // detail pane width (content, excl. its left border)
+	detailW     int    // detail pane width including padding, excluding borders
 	gap         string // inter-column gap, wider on large terminals
 	showColHead bool
 	showDetail  bool // very wide terminal: detail side panel on the right
@@ -545,12 +545,12 @@ func (m *Model) layoutList() listLayout {
 	}
 	l.roomy = m.height >= 22
 	l.showColHead = m.height >= 16 && w >= 70
-	if w >= 130 {
+	if w >= 130 && m.height >= 16 {
 		l.showDetail = true
 		// Grows to 56 on ultrawides so the host-key fingerprint and ping
 		// spread fit on one line instead of leaving a dead zone.
 		l.detailW = clamp(w/4, 36, 56)
-		l.listW = w - l.detailW - 1 // -1 for the pane's left hairline
+		l.listW = w - l.detailW - 5 // two borders per pane and one-cell gutter
 	}
 	l.nameW = clamp(l.listW/5, 14, 28)
 	l.endW = clamp(l.listW/2, 20, 60)
@@ -670,7 +670,11 @@ func (m *Model) viewList() string {
 		return b.String()
 	}
 
-	region := strings.TrimRight(m.renderRowRegion(vis, l, avail), "\n")
+	rowAvail := avail
+	if l.showDetail {
+		rowAvail -= 3 // rounded frame and panel title
+	}
+	region := strings.TrimRight(m.renderRowRegion(vis, l, rowAvail), "\n")
 	// Fleet summary strip: ambient totals anchored just above the footer,
 	// rendered only when at least 3 spare lines remain (breathing room +
 	// summary) so tight frames never pay for it. No hairline of its own —
@@ -684,8 +688,11 @@ func (m *Model) viewList() string {
 	}
 	var content string
 	if l.showDetail {
-		left := lipgloss.NewStyle().Width(l.listW).MaxHeight(max(contentH, 1)).Render(region)
-		content = lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderDetail(m.selected(vis), l, contentH))
+		inside := max(contentH-2, 1)
+		left := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(theme.Faint).
+			Width(l.listW).Height(inside).MaxHeight(contentH).
+			Render(strings.Repeat(" ", l.pad) + theme.Sub.Render("Hosts") + "\n" + region)
+		content = lipgloss.JoinHorizontal(lipgloss.Top, left, " ", m.renderDetail(m.selected(vis), l, contentH))
 	} else {
 		content = region
 	}

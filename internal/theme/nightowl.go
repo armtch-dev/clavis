@@ -1,7 +1,7 @@
 // Package theme ports the Night Owl palette used by scriptorium
 // (powershell-scripts-tui/src/Core.psm1) so both tools share one look.
 //
-// The visual language here is flat, matte, and uniform: square thin borders,
+// The visual language here is flat, matte, and uniform: rounded thin borders,
 // muted section headers, and a single monochrome icon family (no colour
 // emoji) drawn from the same dingbat/geometric glyphs scriptorium uses.
 package theme

@@ -146,6 +146,28 @@ func TestHostTableIdentityFirst(t *testing.T) {
 	}
 }
 
+func TestRoundedListPanels(t *testing.T) {
+	m := newTestModel(t)
+	m.screen = scrList
+	addPasswordProfile(t, m, "host")
+	for _, size := range [][2]int{{140, 30}, {130, 16}, {80, 24}, {140, 12}} {
+		m.width, m.height = size[0], size[1]
+		out := ansi.Strip(m.View())
+		framed := size[0] >= 130 && size[1] >= 16
+		if strings.Contains(out, "╭") != framed {
+			t.Fatalf("%v: unexpected panel borders", size)
+		}
+		if framed && (!strings.Contains(out, "Hosts") || !strings.Contains(out, "Details") || strings.Count(out, "╭") != 2) {
+			t.Fatalf("%v: missing panel titles or frames: %s", size, out)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if lipgloss.Width(line) > size[0] {
+				t.Fatalf("%v: overflowing panel: %s", size, line)
+			}
+		}
+	}
+}
+
 // bgFill (the mechanic under the selection fill) must emit exactly `width`
 // cells — clipping over-wide input, padding short input — and re-open the
 // background after every per-cell reset.

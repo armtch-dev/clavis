@@ -32,13 +32,14 @@ type detailTier struct {
 func (m *Model) renderDetail(p *profile.Profile, l listLayout, avail int) string {
 	avail = max(avail, 1)
 	pane := lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder(), false, false, false, true).
+		Border(lipgloss.RoundedBorder()).
 		BorderForeground(theme.Faint).
 		Padding(0, 2).
 		Width(l.detailW).
-		Height(avail).
+		Height(max(avail-2, 1)).
 		MaxHeight(avail)
-	cw := l.detailW - 4 // content width inside the padding
+	cw := l.detailW - 4     // content width inside the padding
+	rows := max(avail-3, 1) // borders and title
 	if p == nil {
 		return pane.Render(theme.Hint.Render("no profile selected"))
 	}
@@ -54,13 +55,13 @@ func (m *Model) renderDetail(p *profile.Profile, l listLayout, avail int) string
 	}
 	lines := m.detailLines(p, cw, tiers[len(tiers)-1])
 	for _, t := range tiers {
-		if cand := m.detailLines(p, cw, t); len(cand) <= avail {
+		if cand := m.detailLines(p, cw, t); len(cand) <= rows {
 			lines = cand
 			break
 		}
 	}
 	// If even the barest tier overflows, MaxHeight clips the tail.
-	return pane.Render(strings.Join(lines, "\n"))
+	return pane.Render(theme.Sub.Render("Details") + "\n" + strings.Join(lines[:min(len(lines), rows)], "\n"))
 }
 
 // detailLines assembles the card's display lines for one degradation tier.
