@@ -61,7 +61,19 @@ The Keychain cache and a security-key enrollment are alternatives to each other,
 
 ### The TUI
 
-The main interface is a list of SSH profiles. Keybindings:
+The main interface puts host names and targets first, followed by reachability
+and right-aligned latency. Wide terminals show rounded Hosts and Details panels;
+compact terminals keep a borderless list. Auth methods, tags, and latency history
+live in details (`v` opens full details at any width). Network reachability,
+authentication results, and host-key pinning are separate states. Reachable hosts
+stay green even when latency is high.
+
+The header summarizes host health; the lower strip shows sync state. The footer
+keeps primary actions visible, including during status messages; `?` lists all
+shortcuts. Profile setup uses named Host, Credentials, Options, and Test stages
+with field counts for the applicable questions.
+
+Keybindings:
 
 | Key | Action |
 | --- | --- |

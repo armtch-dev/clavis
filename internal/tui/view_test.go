@@ -202,6 +202,40 @@ func TestDetailsSeparateNetworkAuthenticationAndTrust(t *testing.T) {
 	}
 }
 
+func TestWizardNamedStagesAndStableNavigation(t *testing.T) {
+	m := newTestModel(t)
+	m.width, m.height = 90, 30
+	w := newWizard(m, nil)
+	m.wizard = w
+	for _, step := range []wstep{stepName, stepHost, stepPassword, stepCategory, stepTest} {
+		w.usePassword = true
+		w.setStep(step)
+		progress := ansi.Strip(w.progress(72))
+		if !strings.Contains(progress, "field ") || !strings.Contains(progress, "[") || !strings.Contains(progress, "Host") || !strings.Contains(progress, "Test") {
+			t.Fatalf("step %v missing named stages: %s", step, progress)
+		}
+	}
+	w.setStep(stepHost)
+	before := ansi.Strip(w.view(90, 28))
+	w.errs = "Invalid host"
+	after := ansi.Strip(w.view(90, 28))
+	footerRow := func(s string) int {
+		for i, line := range strings.Split(s, "\n") {
+			if strings.Contains(line, "esc") {
+				return i
+			}
+		}
+		return -1
+	}
+	if footerRow(before) < 0 || footerRow(before) != footerRow(after) {
+		t.Fatal("validation moved wizard navigation")
+	}
+	iw := newIdentityWizard(m, nil)
+	if progress := ansi.Strip(iw.progress(72)); strings.Contains(progress, "Host") || strings.Contains(progress, "Test") || !strings.Contains(progress, "Identity") {
+		t.Fatalf("identity wizard has host stages: %s", progress)
+	}
+}
+
 // bgFill (the mechanic under the selection fill) must emit exactly `width`
 // cells — clipping over-wide input, padding short input — and re-open the
 // background after every per-cell reset.

@@ -40,7 +40,7 @@ const (
 	stepTest
 )
 
-// allSteps drives skip logic and the progress dots.
+// allSteps drives skip logic and stage field counts.
 var allSteps = []wstep{
 	stepName, stepHost, stepPort, stepIdentity, stepUser,
 	stepUsePassword, stepPassword,
@@ -203,7 +203,7 @@ func (w *wizardModel) setStep(s wstep) {
 	}
 
 	ti := textinput.New()
-	ti.Prompt = "› "
+	ti.Prompt = "▎ "
 	ti.PromptStyle = theme.Accent
 	ti.TextStyle = theme.Value
 	ti.PlaceholderStyle = theme.Dim // bubbles' fixed-grey default ignores the theme
@@ -931,7 +931,7 @@ func (w *wizardModel) view(width, height int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render(title) + "\n")
 	if height >= 14 {
-		b.WriteString(ansi.Truncate(w.progress(inner), dw, "") + "\n\n")
+		b.WriteString(w.progress(inner) + "\n\n")
 	}
 	b.WriteString(theme.Label.Render(stepIcon(w.step)+stepTitle) + "\n\n")
 
@@ -959,15 +959,24 @@ func (w *wizardModel) view(width, height int) string {
 			b.WriteString("\n\n" + theme.Hint.Render("Pasted keys are encrypted straight into the vault — the\noriginal file is never referenced again."))
 		}
 	case stepKeyPaste:
-		b.WriteString(w.area.View())
+		for i, line := range strings.Split(w.area.View(), "\n") {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(bgFill(line, dw, theme.SelBg))
+		}
 	case stepTest:
 		b.WriteString(w.viewTest())
 	default:
-		b.WriteString(w.input.View())
+		b.WriteString(bgFill(w.input.View(), dw, theme.SelBg))
 	}
 
 	if w.errs != "" {
-		b.WriteString("\n\n" + ansi.Truncate(theme.StatusErr.Render("✗ "+w.errs), dw, "…"))
+		b.WriteString("\n" + ansi.Truncate(theme.StatusErr.Render("✗ "+w.errs), dw, "…"))
+	}
+	// Stable navigation row for ordinary fields; large editors keep scrolling.
+	if height >= 24 && w.step != stepKeyPaste && w.step != stepIdentity && w.step != stepTest {
+		b.WriteString(strings.Repeat("\n", max(0, 10-strings.Count(b.String(), "\n"))))
 	}
 	b.WriteString("\n\n" + theme.Divider(dw))
 	// Clip, don't wrap: a wrapped footer breaks the panel's height budget.
@@ -994,31 +1003,50 @@ func (w *wizardModel) view(width, height int) string {
 	return panelView(b.String(), width, height, inner, w.app.panelScroll)
 }
 
-// progress renders the applicable steps as matte dots.
+// Named stages follow the existing field order; counts reflect skipped fields.
 func (w *wizardModel) progress(width int) string {
 	seq := w.sequence()
-	var parts []string
-	for _, s := range seq {
+	stage := func(s wstep) string {
 		switch {
-		case s == w.step:
-			// ◉, not ●: current vs completed must differ by shape, not
-			// colour alone (NO_COLOR, colour-vision deficiency).
-			parts = append(parts, theme.Accent.Render("◉"))
-		case s < w.step:
-			parts = append(parts, theme.Dim.Render("●"))
+		case s == stepTest:
+			return "Test"
+		case s >= stepProxyJump:
+			return "Options"
+		case s >= stepIdentity:
+			return "Credentials"
+		case w.ident != nil:
+			return "Identity"
 		default:
-			parts = append(parts, theme.Hint.Render("·"))
+			return "Host"
 		}
 	}
-	cur := 1
-	for i, s := range seq {
-		if s == w.step {
-			cur = i + 1
-			break
+	current := stage(w.step)
+	cur, total := 0, 0
+	var parts []string
+	prev := ""
+	for _, s := range seq {
+		name := stage(s)
+		if name == current {
+			total++
+			if s == w.step {
+				cur = total
+			}
+		}
+		if name != prev {
+			text := theme.Dim.Render(name)
+			if name == current {
+				text = theme.Accent.Bold(true).Render("[" + name + "]")
+			}
+			parts = append(parts, text)
+			prev = name
 		}
 	}
-	counter := theme.Hint.Render(fmt.Sprintf("step %d of %d", cur, len(seq)))
-	return strings.Join(parts, " ") + "  " + counter
+	counter := theme.Hint.Render(fmt.Sprintf("field %d of %d", cur, total))
+	stages := strings.Join(parts, " · ")
+	if ansi.StringWidth(stages) > width-6 {
+		stages = theme.Accent.Bold(true).Render("[" + current + "]")
+	}
+	return stages + "\n" + counter
 }
 
 // Reconcile without converting a vanished identity into a different credential
