@@ -901,10 +901,14 @@ func (m *Model) Close() {
 
 // --- view ---
 
-func (m *Model) View() string {
+func (m *Model) View() (view string) {
 	if m.quiting {
 		return ""
 	}
+	defer func() {
+		view = lipgloss.NewStyle().Foreground(theme.Fg).Background(theme.Bg).
+			Width(m.width).Height(m.height).Render(view)
+	}()
 	// Below the floor every row wraps and the frame tears — say so instead.
 	if m.width > 0 && (m.width < 40 || m.height < 8) {
 		return center(theme.Dim.Render("terminal too small — need 40×8"), m.width, m.height)

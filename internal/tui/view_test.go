@@ -16,6 +16,27 @@ import (
 	"github.com/armtch-dev/clavis/internal/theme"
 )
 
+func TestViewPaintsNightOwlCanvas(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(old)
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	m := newTestModel(t)
+	for _, size := range [][2]int{{80, 24}, {30, 7}} {
+		m.width, m.height = size[0], size[1]
+		view := m.View()
+		if !strings.Contains(view, "48;2;1;22;39") {
+			t.Fatal("view missing Night Owl background")
+		}
+		if lipgloss.Width(view) != m.width || lipgloss.Height(view) != m.height {
+			t.Fatalf("canvas dimensions = %dx%d, want %dx%d", lipgloss.Width(view), lipgloss.Height(view), m.width, m.height)
+		}
+	}
+	m.quiting = true
+	if m.View() != "" {
+		t.Fatal("quit must leave an empty view")
+	}
+}
+
 // Status messages fade: a matching statusExpireMsg clears the message, a
 // stale-generation one must not clear a newer message, and each message
 // schedules exactly one expiry tick.

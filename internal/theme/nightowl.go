@@ -9,7 +9,6 @@ package theme
 import (
 	"fmt"
 	"math"
-	"os"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -84,76 +83,11 @@ var (
 	SparkDim = lipgloss.Color(BlendHex(HexMuted, HexBg, 0.40))
 )
 
-// Init adapts the palette to the terminal's actual background colour. The
-// defaults assume Night Owl's #011627; on any other background they lose
-// their intended relationship to it — on a mid or light background the dim
-// tiers can sink into the wallpaper entirely. Call once from main before
-// the tea program starts — the OSC query needs the terminal to itself.
-//
-// Three outcomes:
-//   - query answered, Night Owl navy → keep the designed palette
-//   - query answered, anything else  → rebase the tints onto the real bg
-//   - query unanswered (tmux/screen/non-TTY) → the background is
-//     unknowable; truecolor guesses can land invisible, so fall back to
-//     the terminal's own ANSI palette, which its theme guarantees is
-//     legible against itself.
+// Init forces Night Owl without querying or inheriting the terminal theme.
 func Init() {
-	// CLAVIS_BG declares the background the query can't see — the tmux case,
-	// where truecolor *rendering* passes through fine and only the OSC query
-	// dies at the multiplexer. One env var restores the designed look.
-	if hint := os.Getenv("CLAVIS_BG"); len(hint) == 7 && hint[0] == '#' {
-		rebase(hint)
-		return
-	}
-	// tmux/screen sit between us and the real terminal and don't answer the
-	// query — skipping straight to the fallback also avoids stalling launch
-	// on termenv's multi-second OSC timeout.
-	if os.Getenv("TMUX") != "" ||
-		strings.HasPrefix(os.Getenv("TERM"), "screen") ||
-		strings.HasPrefix(os.Getenv("TERM"), "tmux") {
-		ansiFallback()
-		return
-	}
-	bg := termenv.NewOutput(os.Stdout).BackgroundColor()
-	rgb, answered := bg.(termenv.RGBColor)
-	if !answered {
-		ansiFallback()
-		return
-	}
-	hex := termenv.ConvertToRGB(rgb).Hex()
-	rebase(hex)
-}
-
-// ansiFallback remaps every token onto ANSI palette slots. It trades the
-// designed Night Owl look for guaranteed legibility: the user's terminal
-// theme chose these sixteen colours to work on its own background, which
-// we cannot see. Hierarchy flattens a little (Sub joins the default fg,
-// chrome tints disappear) — legible beats subtle.
-func ansiFallback() {
-	Red, Green, Yellow = lipgloss.Color("1"), lipgloss.Color("2"), lipgloss.Color("3")
-	Blue, Magenta, Cyan = lipgloss.Color("4"), lipgloss.Color("5"), lipgloss.Color("6")
-	BrYellow, BrCyan = Yellow, Cyan
-	Muted = lipgloss.Color("8") // "bright black": every theme's designed muted tone
-	Border, SelBg = Muted, Muted
-	Subtle, Faint, SparkDim = Muted, Muted, Muted
-
-	Title = lipgloss.NewStyle().Foreground(Cyan).Bold(true)
-	Label = lipgloss.NewStyle().Foreground(Blue)
-	Value = lipgloss.NewStyle() // terminal default foreground
-	Accent = lipgloss.NewStyle().Foreground(Cyan)
-	Sub = lipgloss.NewStyle() // default fg — legible beats subtle
-	Dim = lipgloss.NewStyle().Foreground(Muted)
-	Hint = lipgloss.NewStyle().Foreground(Muted)
-	Spark = lipgloss.NewStyle().Foreground(Muted)
-	StatusOK = lipgloss.NewStyle().Foreground(Green)
-	StatusWarn = lipgloss.NewStyle().Foreground(Yellow)
-	StatusErr = lipgloss.NewStyle().Foreground(Red)
-	SelTick = lipgloss.NewStyle().Foreground(Cyan)
-	Chip = lipgloss.NewStyle().Foreground(Muted)
-	Tag = lipgloss.NewStyle().Foreground(Blue)
-	ChipAccent = ChipAccent.Foreground(lipgloss.Color("0")).Background(Cyan)
-	ChipWarn = ChipWarn.Foreground(lipgloss.Color("0")).Background(Yellow)
-	Panel = Panel.BorderForeground(Muted)
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	lipgloss.SetHasDarkBackground(true)
+	rebase(HexBg)
 }
 
 // rebase recomputes the whole neutral ramp (and the styles built on it)
@@ -167,7 +101,9 @@ func rebase(bgHex string) {
 	Bg = lipgloss.Color(bgHex)
 	dark := hexLum(bgHex) < 0.5
 	if dark {
-		SelBg = lipgloss.Color(BlendHex(bgHex, HexWhite, 0.14))
+		// Darken the selection so contrast correction preserves semantic hues
+		// instead of bleaching every color against a lighter selected row.
+		SelBg = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.14))
 		Subtle = lipgloss.Color(BlendHex(HexFg, bgHex, 0.45))
 		Muted = lipgloss.Color(BlendHex(HexFg, bgHex, 0.62))
 		Faint = lipgloss.Color(BlendHex(HexFg, bgHex, 0.76))
@@ -200,7 +136,7 @@ func rebase(bgHex string) {
 	BrYellow, BrCyan, White = fit(HexBrYellow), fit(HexBrCyan), fit(HexWhite)
 	Title = Title.Foreground(BrCyan)
 	Value = Value.Foreground(Fg)
-	Label, Tag = Label.Foreground(Subtle), Tag.Foreground(Subtle)
+	Label, Tag = Label.Foreground(Blue), Tag.Foreground(Magenta)
 	Accent, SelTick = Accent.Foreground(BrCyan), SelTick.Foreground(BrCyan)
 	StatusOK, StatusWarn, StatusErr = StatusOK.Foreground(Green), StatusWarn.Foreground(BrYellow), StatusErr.Foreground(Red)
 	Hint = Hint.Foreground(Muted)

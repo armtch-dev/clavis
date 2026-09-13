@@ -333,4 +333,4 @@ paths and deliberately deferred UI/performance validation.
 - `CLAVIS_KEY` — The master key identity string (AGE-SECRET-KEY-1…)
 - `CLAVIS_KEY_FILE` — Path to a file containing the master key (one key per line, comments starting with #)
 - `CLAVIS_CONFIG_DIR` — Override the config directory (default `~/.config/clavis`)
-- `CLAVIS_BG` — Your terminal's background color as `#rrggbb`. Clavis normally asks the terminal for it and adapts the theme; inside tmux/screen that query can't get through and clavis falls back to plain ANSI colors. Set this (e.g. `export CLAVIS_BG="#5a5475"` for Fairyfloss) to get the full adaptive theme there too.
+- Clavis always renders Night Owl in truecolor with a navy background, including inside tmux/screen. Terminal and shell themes are not queried; `CLAVIS_BG` is ignored.
