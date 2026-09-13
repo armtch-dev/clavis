@@ -6,29 +6,21 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/armtch-dev/clavis/internal/probe"
 	"github.com/armtch-dev/clavis/internal/profile"
 	"github.com/armtch-dev/clavis/internal/theme"
 )
 
-// detailTier controls graceful degradation of the detail card when the pane
-// is short: the chart goes first, then the tiny section labels, then the
-// blank lines between blocks, and last the fingerprint's two-line wrap (a
-// clipped fingerprint is worse than a mid-truncated one).
+// Short panes shed charts, section labels, then blank lines.
 type detailTier struct {
 	chart  bool
 	labels bool
 	rules  bool
-	fpWrap bool
 }
 
-// renderDetail draws the right-hand side panel for the selected profile on
-// very wide terminals: a matte pane separated by a thin left hairline,
-// sharing the row region's vertical space exactly. The card reads top to
-// bottom: identity, status badge, connection block, health block (ping
-// spread + two-row latency history chart), security block (full host-key
-// fingerprint, wrapped).
+// renderDetail shares the host panel's height and preserves the details hint.
 func (m *Model) renderDetail(p *profile.Profile, l listLayout, avail int) string {
 	avail = max(avail, 1)
 	pane := lipgloss.NewStyle().
@@ -47,11 +39,10 @@ func (m *Model) renderDetail(p *profile.Profile, l listLayout, avail int) string
 	p = &ep
 
 	tiers := []detailTier{
-		{chart: true, labels: true, rules: true, fpWrap: true},
-		{chart: false, labels: true, rules: true, fpWrap: true},
-		{chart: false, labels: false, rules: true, fpWrap: true},
-		{chart: false, labels: false, rules: false, fpWrap: true},
-		{chart: false, labels: false, rules: false, fpWrap: false},
+		{chart: true, labels: true, rules: true},
+		{labels: true, rules: true},
+		{rules: true},
+		{},
 	}
 	lines := m.detailLines(p, cw, tiers[len(tiers)-1])
 	for _, t := range tiers {
@@ -60,19 +51,20 @@ func (m *Model) renderDetail(p *profile.Profile, l listLayout, avail int) string
 			break
 		}
 	}
-	// If even the barest tier overflows, MaxHeight clips the tail.
-	return pane.Render(theme.Sub.Render("Details") + "\n" + strings.Join(lines[:min(len(lines), rows)], "\n"))
+	if len(lines) > rows {
+		lines = append(lines[:rows-1], theme.Hint.Render("v Full details / copy"))
+	}
+	return pane.Render(theme.Sub.Render("Details") + "\n" + strings.Join(lines, "\n"))
 }
 
 // detailLines assembles the card's display lines for one degradation tier.
 func (m *Model) detailLines(p *profile.Profile, cw int, t detailTier) []string {
-	label := func(s string) string { return theme.Label.Width(6).Render(s) }
+	label := func(s string) string { return theme.Label.Width(15).Render(s) }
 	st, have := m.statuses[p.ID]
 
 	lines := []string{
-		theme.Accent.Render(truncTo(p.Name, cw)),
-		theme.Value.Render(truncTo(fmt.Sprintf("%s@%s:%d", p.User, p.Host, p.Port), cw)),
-		statusBadge(st, have, p.ProxyJump != ""),
+		theme.Value.Bold(true).Render(truncTo(p.Name, cw)),
+		theme.Sub.Render(truncTo(fmt.Sprintf("%s@%s:%d", p.User, p.Host, p.Port), cw)),
 	}
 	section := func(name string) {
 		if t.rules { // "rules" tier now buys breathing room, not hairlines
@@ -84,7 +76,25 @@ func (m *Model) detailLines(p *profile.Profile, cw int, t detailTier) []string {
 	}
 
 	// connection
-	section("connection")
+	section("CONNECTION")
+	network := theme.Dim.Render("· Unchecked")
+	if have {
+		network = theme.StatusErr.Render("○ Down")
+		if st.Reachable {
+			network = theme.StatusOK.Render("● Reachable")
+		}
+	}
+	if p.ProxyJump != "" {
+		network = theme.Dim.Render("· Via jump")
+	}
+	authTest := "Not tested"
+	if result, ok := m.authResults[p.ID]; ok && sameTestTarget(*p, result.endpoint) {
+		authTest = "Failed · t retry"
+		if result.result.OK {
+			authTest = "Passed"
+		}
+	}
+	lines = append(lines, label("Network")+network, label("Authentication")+theme.Value.Render(authTest))
 	var auth []string
 	if p.HasAuth(profile.AuthKey) {
 		auth = append(auth, theme.IconKey+" key")
@@ -95,28 +105,39 @@ func (m *Model) detailLines(p *profile.Profile, cw int, t detailTier) []string {
 	if len(auth) == 0 {
 		auth = append(auth, "none")
 	}
-	lines = append(lines, label("auth")+theme.Value.Render(strings.Join(auth, "  ")))
-	lines = append(lines, theme.Value.Render("Credentials: "+m.authReadiness(*p)))
+	lines = append(lines, label("Method")+theme.Value.Render(strings.Join(auth, "  ")))
+	if !strings.HasPrefix(m.authReadiness(*p), "last auth test") {
+		lines = append(lines, label("Credentials")+theme.Value.Render(truncTo(m.authReadiness(*p), cw-15)))
+	}
 	if p.IdentityID != "" {
 		name := "(deleted)"
 		if id := m.idents.ByID(p.IdentityID); id != nil {
 			name = id.Name
 		}
-		lines = append(lines, label("ident")+theme.Value.Render(truncTo(name, cw-6)))
+		lines = append(lines, label("Identity")+theme.Value.Render(truncTo(name, cw-15)))
 	}
+	trust := "Not pinned"
+	if p.HostKeyFP != "" {
+		trust = "Pinned"
+	}
+	lines = append(lines, label("Host key")+theme.Value.Render(trust))
 	if p.Category != "" {
-		lines = append(lines, label("group")+theme.Value.Render(truncTo(p.Category, cw-6)))
+		lines = append(lines, label("Group")+theme.Value.Render(truncTo(p.Category, cw-15)))
 	}
 	if len(p.Tags) > 0 {
-		lines = append(lines, label("tags")+theme.Tag.Render(truncTo("#"+strings.Join(p.Tags, " #"), cw-6)))
+		lines = append(lines, label("Tags")+theme.Tag.Render(truncTo("#"+strings.Join(p.Tags, " #"), cw-15)))
 	}
 	if p.ProxyJump != "" {
-		lines = append(lines, label("jump")+theme.Value.Render(truncTo(p.ProxyJump, cw-6)))
+		lines = append(lines, label("Jump")+theme.Value.Render(truncTo(p.ProxyJump, cw-15)))
 	}
 
 	// health
-	section("health")
-	lines = append(lines, label("ping")+pingSpread(st, have, cw))
+	section("LATENCY")
+	current := theme.Hint.Render("—")
+	if have && st.Reachable && p.ProxyJump == "" {
+		current = lipgloss.NewStyle().Foreground(theme.LatencyColor(st.LatencyMs)).Render(fmt.Sprintf("%.0f ms", st.LatencyMs))
+	}
+	lines = append(lines, label("Current")+current, theme.Label.Render("Min / Avg / Max"), pingSpread(st, have, 0))
 	if !st.CheckedAt.IsZero() {
 		lines = append(lines, theme.Dim.Render("checked "+relDur(time.Since(st.CheckedAt))+" ago"))
 	}
@@ -129,15 +150,11 @@ func (m *Model) detailLines(p *profile.Profile, cw int, t detailTier) []string {
 		if !st.LastSeen.IsZero() {
 			seen = theme.Value.Render(st.LastSeen.Format("Jan 2 15:04"))
 		}
-		lines = append(lines, label("seen")+seen)
+		lines = append(lines, label("Last seen")+seen)
 	}
 
-	// security
-	if p.HostKeyFP != "" {
-		section("security")
-		lines = append(lines, fingerprintLines(p.HostKeyFP, cw, t.fpWrap, label)...)
-	}
-	return append(lines, theme.Hint.Render("v full details / copy / chart scale"))
+	lines = append(lines, theme.Hint.Render("v Full details / copy"))
+	return strings.Split(ansi.Hardwrap(strings.Join(lines, "\n"), cw, true), "\n")
 }
 
 // statusBadge renders the reachability state as a bold coloured badge line:

@@ -186,6 +186,22 @@ func TestSlowReachableStatusStaysGreen(t *testing.T) {
 	}
 }
 
+func TestDetailsSeparateNetworkAuthenticationAndTrust(t *testing.T) {
+	m := newTestModel(t)
+	p := addPasswordProfile(t, m, "host")
+	p.HostKeyFP = "SHA256:full-fingerprint-preserved"
+	m.statuses[p.ID] = probe.Status{Reachable: true, LatencyMs: 24}
+	text := ansi.Strip(strings.Join(m.detailLines(p, 40, detailTier{labels: true}), "\n"))
+	for _, want := range []string{"CONNECTION", "Reachable", "Authentication Not tested", "Host key       Pinned", "LATENCY", "Min / Avg / Max"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, p.HostKeyFP) || !strings.Contains(m.detailText(*p), p.HostKeyFP) {
+		t.Fatal("fingerprint must live in full details")
+	}
+}
+
 // bgFill (the mechanic under the selection fill) must emit exactly `width`
 // cells — clipping over-wide input, padding short input — and re-open the
 // background after every per-cell reset.

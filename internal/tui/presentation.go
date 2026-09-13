@@ -142,7 +142,7 @@ func (m *Model) detailText(p profile.Profile) string {
 	if !st.CheckedAt.IsZero() {
 		checked = st.CheckedAt.Format(time.RFC3339) + " (" + relDur(time.Since(st.CheckedAt)) + " ago)"
 	}
-	return fmt.Sprintf("%s\nTarget: %s@%s\nIdentity: %s\nJump: %s\nCredentials: %s\nReachability: %s\nLast check: %s\nFingerprint: %s\nPing min / avg / max: %s\nCharts: each host auto-scales 0 to its visible maximum (ms). Columns are samples, not evenly spaced time; × = failure. Failed probes back off up to 5m. Reachable does not mean authenticated; t tests auth.\n\n%s", p.Name, p.User, p.Addr(), id, jump, m.authReadiness(p), ansi.Strip(statusBadge(st, have, p.ProxyJump != "")), checked, fp, ansi.Strip(pingSpread(st, have, 0)), m.syncDetails())
+	return fmt.Sprintf("%s\nTarget: %s@%s\n\nCONNECTION\nIdentity: %s\nJump: %s\nCredentials / auth test: %s\nReachability: %s\nGroup: %s\nTags: %s\n\nSECURITY\nFingerprint: %s\n\nLATENCY\nLast check: %s\nMin / Avg / Max: %s\nCharts: each host auto-scales 0 to its visible maximum (ms). Columns are samples, not evenly spaced time; × = failure. Failed probes back off up to 5m. Reachable does not mean authenticated; t tests auth.\n\nSYNC\n%s", p.Name, p.User, p.Addr(), id, jump, m.authReadiness(p), ansi.Strip(statusBadge(st, have, p.ProxyJump != "")), p.Category, strings.Join(p.Tags, ", "), fp, checked, ansi.Strip(pingSpread(st, have, 0)), m.syncDetails())
 }
 
 // Presence is cached on metadata/credential publication, never read by View.
