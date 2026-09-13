@@ -151,8 +151,8 @@ func statusBadge(st probe.Status, have, viaJump bool) string {
 	}
 	switch {
 	case have && st.Reachable:
-		s := lipgloss.NewStyle().Foreground(theme.LatencyColor(st.LatencyMs)).Bold(true)
-		return s.Render(fmt.Sprintf("%s UP · %.0fms", theme.IconUp, st.LatencyMs))
+		return theme.StatusOK.Bold(true).Render(theme.IconUp+" UP") + theme.Dim.Render(" · ") +
+			lipgloss.NewStyle().Foreground(theme.LatencyColor(st.LatencyMs)).Render(fmt.Sprintf("%.0fms", st.LatencyMs))
 	case have:
 		txt := theme.IconDown + " DOWN"
 		if !st.LastSeen.IsZero() {

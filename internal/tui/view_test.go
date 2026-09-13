@@ -168,6 +168,24 @@ func TestRoundedListPanels(t *testing.T) {
 	}
 }
 
+func TestSlowReachableStatusStaysGreen(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(old)
+	m := newTestModel(t)
+	m.width, m.height = 120, 30
+	p := addPasswordProfile(t, m, "slow")
+	m.statuses[p.ID] = probe.Status{Reachable: true, LatencyMs: 500}
+	row := m.renderRow(*p, false, m.layoutList())
+	green := lipgloss.NewStyle().Foreground(theme.Green).Width(12).Render("● Reachable")
+	if !strings.Contains(row, green) {
+		t.Fatalf("slow reachable host lost green status: %q", row)
+	}
+	if !strings.Contains(statusBadge(m.statuses[p.ID], true, false), theme.StatusOK.Bold(true).Render("● UP")) {
+		t.Fatal("detail reachability follows latency color")
+	}
+}
+
 // bgFill (the mechanic under the selection fill) must emit exactly `width`
 // cells — clipping over-wide input, padding short input — and re-open the
 // background after every per-cell reset.

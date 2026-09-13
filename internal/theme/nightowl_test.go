@@ -1,10 +1,26 @@
 package theme
 
 import (
+	"math"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
 )
+
+func TestSemanticPaletteContrast(t *testing.T) {
+	defer rebase(HexBg)
+	for _, bg := range []string{HexBg, "#ffffff", "#5a5475", "#808080"} {
+		rebase(bg)
+		for _, fg := range []lipgloss.Color{Fg, Subtle, Muted, Green, Red, BrYellow, BrCyan} {
+			for _, surface := range []string{bg, string(SelBg)} {
+				a, b := luminance(string(fg)), luminance(surface)
+				if ratio := (math.Max(a, b) + .05) / (math.Min(a, b) + .05); ratio < 4.5 {
+					t.Errorf("%s on %s: contrast %.2f", fg, surface, ratio)
+				}
+			}
+		}
+	}
+}
 
 // Inside tmux the background query can't reach the real terminal. Without a
 // hint that means the ANSI fallback; with CLAVIS_BG the full tint system

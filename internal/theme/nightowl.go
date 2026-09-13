@@ -16,14 +16,14 @@ import (
 	"github.com/muesli/termenv"
 )
 
-// Palette — hex values copied verbatim from scriptorium's $script:NightOwl table.
+// Night Owl base with quieter semantic colors for connection management.
 const (
 	HexBg       = "#011627"
 	HexFg       = "#d6deeb" // canonical Night Owl foreground (soft blue-white)
 	HexSelBg    = "#093b5e"
 	HexBlack    = "#011627"
-	HexRed      = "#ef5350"
-	HexGreen    = "#22da6e"
+	HexRed      = "#ef7373"
+	HexGreen    = "#7bd88f"
 	HexYellow   = "#c5e478"
 	HexBlue     = "#82aaff"
 	HexMagenta  = "#c792ea"
@@ -32,7 +32,8 @@ const (
 	HexMuted    = "#637777" // Night Owl comment teal-grey — harmonizes with the bg
 	HexBrYellow = "#ffeb95"
 	HexBrCyan   = "#7fdbca"
-	HexBorder   = "#5f7e97" // Night Owl panel border (steel blue)
+	HexBorder   = "#355269"
+	HexSubtle   = "#9aaec0"
 )
 
 // Uniform monochrome icon set. The ︎ text-presentation selector forces
@@ -178,6 +179,11 @@ func rebase(bgHex string) {
 		Faint = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.40))
 		SparkDim = lipgloss.Color(BlendHex(bgHex, HexBlack, 0.30))
 	}
+	if strings.EqualFold(bgHex, HexBg) {
+		SelBg = lipgloss.Color(HexSelBg)
+		Subtle = lipgloss.Color(HexSubtle)
+		Faint = lipgloss.Color(HexBorder)
+	}
 	// Avoid a selection fill that crosses the black/white contrast boundary
 	// on mid-tone backgrounds, where neither foreground could fit both.
 	if luminance(bgHex) <= .179 && luminance(string(SelBg)) > .183 {
@@ -194,7 +200,7 @@ func rebase(bgHex string) {
 	BrYellow, BrCyan, White = fit(HexBrYellow), fit(HexBrCyan), fit(HexWhite)
 	Title = Title.Foreground(BrCyan)
 	Value = Value.Foreground(Fg)
-	Label, Tag = Label.Foreground(Blue), Tag.Foreground(Blue)
+	Label, Tag = Label.Foreground(Subtle), Tag.Foreground(Subtle)
 	Accent, SelTick = Accent.Foreground(BrCyan), SelTick.Foreground(BrCyan)
 	StatusOK, StatusWarn, StatusErr = StatusOK.Foreground(Green), StatusWarn.Foreground(BrYellow), StatusErr.Foreground(Red)
 	Hint = Hint.Foreground(Muted)

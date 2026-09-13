@@ -983,10 +983,10 @@ func (m *Model) renderRow(p profile.Profile, selected bool, l listLayout) string
 	latCell := ""
 	if have {
 		if st.Reachable {
-			dotColor = theme.LatencyColor(st.LatencyMs)
+			dotColor = theme.Green
 			dot = theme.IconUp
 			// Digits carry the data, the repeated unit is noise: dim the "ms".
-			latCell = lipgloss.NewStyle().Foreground(dotColor).Render(fmt.Sprintf("%4.0f", st.LatencyMs)) +
+			latCell = lipgloss.NewStyle().Foreground(theme.LatencyColor(st.LatencyMs)).Render(fmt.Sprintf("%4.0f", st.LatencyMs)) +
 				theme.Dim.Render("ms")
 		} else {
 			dotColor, dot, latency = theme.Red, theme.IconDown, "  down"
