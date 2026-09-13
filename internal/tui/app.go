@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/armtch-dev/clavis/internal/config"
 	"github.com/armtch-dev/clavis/internal/fido2"
@@ -965,9 +966,7 @@ func (m *Model) footerHeight() int {
 	return 1
 }
 
-// viewStatusBar renders the footer: a hairline, then one shared line — the
-// ephemeral status message while one is showing (it fades on its TTL), the
-// key legend otherwise. One line of chrome, never a stack.
+// Status and essential keys share one footer line beneath the divider.
 func (m *Model) viewStatusBar() string {
 	width := max(m.width, 40)
 	pad := strings.Repeat(" ", m.layoutList().pad)
@@ -992,7 +991,16 @@ func (m *Model) viewStatusBar() string {
 			msg = m.spin.View() + " syncing… " + msg
 			style = theme.Accent
 		}
-		lines = append(lines, pad+style.MaxWidth(width-len(pad)-1).Render(msg))
+		if m.screen == scrList && !m.help {
+			hints := hintKeys([][2]string{{"enter", "connect"}, {"?", "help"}})
+			if m.filtering || m.catTarget != "" {
+				hints = m.legend(width)
+			}
+			budget := max(1, width-2*len(pad)-lipgloss.Width(hints)-2)
+			lines = append(lines, spread(pad+style.Render(ansi.Truncate(msg, budget, "…")), hints+pad, width))
+		} else {
+			lines = append(lines, pad+style.MaxWidth(width-len(pad)-1).Render(msg))
+		}
 	case m.screen == scrList && !m.help:
 		lines = append(lines, pad+m.legend(width-2*len(pad)))
 	}
@@ -1008,10 +1016,9 @@ func (m *Model) legend(avail int) string {
 		return hintKeys([][2]string{{"enter", "set category"}, {"esc", "cancel"}})
 	}
 	tiers := [][][2]string{
-		{{"enter", "connect"}, {"r", "run script"}, {"m", "scripts"}, {"a", "add"}, {"e", "edit"}, {"c", "category"}, {"d", "delete"}, {"t", "test"},
-			{"y", "identities"}, {"s", "sync"}, {"g", "settings"}, {"i", "import"}, {"o", "sort"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
-		{{"enter", "connect"}, {"r", "run"}, {"a", "add"}, {"e", "edit"}, {"d", "delete"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
-		{{"v", "details"}, {"?", "help"}, {"q", "quit"}},
+		{{"enter", "connect"}, {"/", "filter"}, {"a", "add"}, {"e", "edit"}, {"?", "all keys"}, {"q", "quit"}},
+		{{"enter", "connect"}, {"/", "filter"}, {"?", "help"}, {"q", "quit"}},
+		{{"enter", "connect"}, {"?", "help"}, {"q", "quit"}},
 		{{"?", "help"}, {"q", "quit"}},
 	}
 	for _, t := range tiers {

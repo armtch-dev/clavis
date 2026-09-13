@@ -235,10 +235,7 @@ func TestBgFillWidth(t *testing.T) {
 	}
 }
 
-// The fleet summary strip: segments appear only when they apply, and the
-// whole strip disappears when there is nothing to say.
-// The footer is one shared line under the divider: the legend normally, the
-// ephemeral status message while one is showing — never both stacked.
+// Status feedback keeps essential keys on the same footer line.
 func TestFooterSingleLine(t *testing.T) {
 	m := newTestModel(t)
 	m.screen = scrList
@@ -259,8 +256,8 @@ func TestFooterSingleLine(t *testing.T) {
 	if !strings.Contains(bar, "synced to origin") {
 		t.Fatal("status message missing from footer")
 	}
-	if strings.Contains(bar, "connect") {
-		t.Fatal("legend should yield to the status message, not stack under it")
+	if !strings.Contains(bar, "connect") || !strings.Contains(bar, "help") {
+		t.Fatal("status must preserve essential navigation hints")
 	}
 }
 
@@ -289,8 +286,8 @@ func TestFleetSummary(t *testing.T) {
 	m.statuses[up2.ID] = probe.Status{ProfileID: up2.ID, Reachable: true, LatencyMs: 30}
 
 	s := m.fleetSummary(l)
-	if !strings.Contains(s, "2 up") || !strings.Contains(s, "avg 20ms") {
-		t.Errorf("strip missing up/avg segments: %q", s)
+	if s != "" {
+		t.Errorf("host totals belong in header: %q", s)
 	}
 	if strings.Contains(s, "down") || strings.Contains(s, theme.IconSync) {
 		t.Errorf("strip has segments that don't apply: %q", s)
@@ -300,8 +297,8 @@ func TestFleetSummary(t *testing.T) {
 	m.statuses[dn.ID] = probe.Status{ProfileID: dn.ID, Reachable: false}
 	m.cfg.Sync.Remote = "https://github.com/yshah/clavis-sync.git"
 	s = m.fleetSummary(l)
-	if !strings.Contains(s, "1 down") || !strings.Contains(s, "yshah/clavis-sync") {
-		t.Errorf("strip missing down/remote segments: %q", s)
+	if !strings.Contains(s, "Not synced") || strings.Contains(s, "yshah/clavis-sync") {
+		t.Errorf("strip must show sync state: %q", s)
 	}
 	if w := lipgloss.Width(s); w > l.width {
 		t.Errorf("strip is %d cells wide, frame is %d", w, l.width)
@@ -313,8 +310,20 @@ func TestFleetSummary(t *testing.T) {
 	if len(lines) != 30 {
 		t.Fatalf("frame height = %d, want 30", len(lines))
 	}
-	if !strings.Contains(lines[len(lines)-3], "avg") {
+	if !strings.Contains(lines[len(lines)-3], "Not synced") {
 		t.Errorf("strip not anchored above the footer, line = %q", lines[len(lines)-3])
+	}
+	if !strings.Contains(lines[0], "2 reachable") || !strings.Contains(lines[0], "1 down") {
+		t.Fatalf("header missing consolidated totals: %s", lines[0])
+	}
+	for _, tc := range []struct {
+		state SyncState
+		want  string
+	}{{SyncState{LastSuccess: time.Now()}, "Synced"}, {SyncState{Dirty: true}, "Sync pending"}, {SyncState{Error: "failed"}, "Sync failed"}} {
+		m.syncState = tc.state
+		if got := m.fleetSummary(l); !strings.Contains(got, tc.want) {
+			t.Fatalf("want %q: %s", tc.want, got)
+		}
 	}
 }
 

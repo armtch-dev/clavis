@@ -614,14 +614,16 @@ func (m *Model) viewList() string {
 	if m.sortMode != sortDefault && !l.showColHead {
 		meta = append(meta, theme.Dim.Render("sort ")+theme.Sub.Render(m.sortMode.String()))
 	}
-	// Up counts, averages, and the remote live in the fleet strip — the
-	// header keeps only what must stay glanceable from the top: size,
-	// trouble, and vault state.
+	// Consolidated host health; sync state has its own quiet strip.
 	if n := len(m.store.Profiles); n > 0 {
-		down := 0
+		up, down := 0, 0
 		for _, p := range m.store.Profiles {
-			if st, ok := m.statuses[p.ID]; ok && !st.Reachable {
-				down++
+			if st, ok := m.statuses[p.ID]; ok && p.ProxyJump == "" {
+				if st.Reachable {
+					up++
+				} else {
+					down++
+				}
 			}
 		}
 		count := fmt.Sprintf("%d host", n)
@@ -629,6 +631,9 @@ func (m *Model) viewList() string {
 			count += "s"
 		}
 		meta = append(meta, theme.Dim.Render(count))
+		if up > 0 {
+			meta = append(meta, theme.Sub.Render(fmt.Sprintf("%d reachable", up)))
+		}
 		// A down host can scroll out of view on a long list — keep the fact
 		// that something is down glanceable at the top level.
 		if down > 0 {
@@ -705,51 +710,26 @@ func (m *Model) viewList() string {
 	return b.String()
 }
 
-// fleetSummary builds the one-line ambient fleet strip: up/down totals, the
-// average latency over reachable hosts, and the sync remote. Segments that
-// don't apply are omitted; an empty result suppresses the strip entirely.
-// Deliberately quiet — dimmed status dots, muted text.
+// Sync state stays separate from the header's host-health totals.
 func (m *Model) fleetSummary(l listLayout) string {
-	up, down := 0, 0
-	var sum float64
-	for _, p := range m.store.Profiles {
-		st, ok := m.statuses[p.ID]
-		if !ok {
-			continue
-		}
-		if st.Reachable {
-			up++
-			sum += st.LatencyMs
-		} else {
-			down++
-		}
-	}
-	var counts []string
-	if up > 0 {
-		counts = append(counts, theme.StatusOK.Render(theme.IconUp)+theme.Dim.Render(fmt.Sprintf(" %d up", up)))
-	}
-	if down > 0 {
-		counts = append(counts, theme.StatusErr.Render(theme.IconDown)+theme.Dim.Render(fmt.Sprintf(" %d down", down)))
-	}
-	var segs []string
-	if len(counts) > 0 {
-		segs = append(segs, strings.Join(counts, theme.Dim.Render(" · ")))
-	}
-	if up > 0 {
-		segs = append(segs, theme.Dim.Render("avg ")+theme.Sub.Render(fmt.Sprintf("%.0fms", sum/float64(up))))
-	}
-	if m.cfg.Sync.Remote != "" {
-		segs = append(segs, theme.Dim.Render(theme.IconSync+" "+shortRemote(m.cfg.Sync.Remote)))
-	}
-	if len(segs) == 0 {
+	if m.cfg.Sync.Remote == "" {
 		return ""
 	}
-	line := strings.Repeat(" ", l.pad) + strings.Join(segs, "    ")
+	s := m.SyncStatus()
+	text, style := "Not synced", theme.Dim
+	switch {
+	case s.InFlight:
+		text, style = "Syncing…", theme.Accent
+	case s.Error != "":
+		text, style = "Sync failed · g settings", theme.StatusErr
+	case s.Pending || s.Dirty:
+		text, style = "Sync pending", theme.StatusWarn
+	case !s.LastSuccess.IsZero():
+		text = "Synced"
+	}
+	line := strings.Repeat(" ", l.pad) + style.Render(theme.IconSync+" "+text)
 	return ansi.Truncate(line, l.width, "")
 }
-
-// Status dots for the fleet strip, pulled toward the background so the strip
-// stays ambient rather than echoing the full-brightness row indicators.
 
 // listEntry is one display line of the row region: either a profile row
 // (idx into vis) or a category group heading.
